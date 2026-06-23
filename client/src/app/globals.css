@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+
+  /* ── Dashboard Design Tokens (from Figma) ── */
+  --color-app-bg: #050505;
+  --color-sidebar-bg: #000000;
+  --color-surface: #0A0A0A;
+  --color-surface-border: #242424;
+  --color-text-primary: #FFFFFF;
+  --color-text-muted: #969696;
+  --color-sidebar-sub-border: #1D1D1D;
+  --color-user-footer-bg: #0D0D0D;
+
+  /* Card palette */
+  --color-card-blue: #C2DBF4;
+  --color-card-peach: #F6DAC1;
+  --color-card-pink: #F6CBE0;
+  --color-card-lavender: #DDCDF4;
+  --color-card-green: #C4EED2;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-inter: var(--font-inter);
+  --font-jakarta: var(--font-plus-jakarta-sans);
+  --font-arimo: var(--font-arimo);
+
+  /* Surface & layout tokens */
+  --color-app-bg: var(--color-app-bg);
+  --color-sidebar-bg: var(--color-sidebar-bg);
+  --color-surface: var(--color-surface);
+  --color-surface-border: var(--color-surface-border);
+  --color-text-primary: var(--color-text-primary);
+  --color-text-muted: var(--color-text-muted);
+  --color-sidebar-sub-border: var(--color-sidebar-sub-border);
+  --color-user-footer-bg: var(--color-user-footer-bg);
+
+  /* Card palette */
+  --color-card-blue: var(--color-card-blue);
+  --color-card-peach: var(--color-card-peach);
+  --color-card-pink: var(--color-card-pink);
+  --color-card-lavender: var(--color-card-lavender);
+  --color-card-green: var(--color-card-green);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
