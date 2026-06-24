@@ -9,6 +9,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10"
   },
   "peerDependencies": {
@@ -19,6 +20,7 @@
     "@elysiajs/cors": "^1.4.2",
     "@elysiajs/jwt": "^1.4.2",
     "@neondatabase/serverless": "^1.1.0",
+    "cloudinary": "^2.10.0",
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.4.29",
     "socket.io": "^4.8.3"

@@ -6,12 +6,14 @@ interface InfiniteCanvasProps {
   children: React.ReactNode;
   isActive: boolean;
   canvasColor?: string;
+  canvasOffsetRef?: React.MutableRefObject<{ x: number, y: number }>;
 }
 
 export default function InfiniteCanvas({
   children,
   isActive,
   canvasColor = "var(--color-app-bg)",
+  canvasOffsetRef,
 }: InfiniteCanvasProps) {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -21,8 +23,9 @@ export default function InfiniteCanvas({
   useEffect(() => {
     if (!isActive) {
       setOffset({ x: 0, y: 0 });
+      if (canvasOffsetRef) canvasOffsetRef.current = { x: 0, y: 0 };
     }
-  }, [isActive]);
+  }, [isActive, canvasOffsetRef]);
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (!isActive) return;
@@ -33,10 +36,12 @@ export default function InfiniteCanvas({
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!isDragging || !isActive) return;
-    setOffset({
+    const newOffset = {
       x: e.clientX - startPos.current.x,
       y: e.clientY - startPos.current.y,
-    });
+    };
+    setOffset(newOffset);
+    if (canvasOffsetRef) canvasOffsetRef.current = newOffset;
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -47,7 +52,7 @@ export default function InfiniteCanvas({
 
   return (
     <div
-      className={`absolute inset-0 overflow-hidden transition-colors duration-500 ${
+      className={`absolute inset-0 overflow-hidden transition-colors duration-500 ease-out ${
         isActive ? "cursor-grab active:cursor-grabbing" : ""
       }`}
       style={{
@@ -70,7 +75,7 @@ export default function InfiniteCanvas({
         }}
       >
         <div 
-          className="transition-all duration-500"
+          className="transition-all duration-500 ease-out"
           style={{ 
             transform: isActive ? "scale(1)" : "scale(1)",
             width: "100%",

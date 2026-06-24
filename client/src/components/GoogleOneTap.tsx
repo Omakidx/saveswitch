@@ -19,6 +19,7 @@ declare global {
             auto_select?: boolean;
             cancel_on_tap_outside?: boolean;
             prompt_parent_id?: string;
+            use_fedcm_for_prompt?: boolean;
           }) => void;
           prompt: (
             notification?: (notification: {
@@ -61,7 +62,7 @@ export default function GoogleOneTap({ clientId }: GoogleOneTapProps) {
 
         if (data.success) {
           // Redirect to dashboard on successful sign-in
-          window.location.href = "/dashboard?auth=success&method=onetap";
+          window.location.href = "/dashboard";
         } else {
           console.error("One Tap sign-in failed:", data.error);
         }
@@ -85,6 +86,7 @@ export default function GoogleOneTap({ clientId }: GoogleOneTapProps) {
           callback: handleCredentialResponse,
           auto_select: false,
           cancel_on_tap_outside: true,
+          use_fedcm_for_prompt: false,
         });
 
         // Show the One Tap prompt

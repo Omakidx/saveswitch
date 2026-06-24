@@ -23,3 +23,42 @@ Team Memory initialized. All roles should:
 3. Check for BLOCKER entries that may affect your work
 4. Respond to FEEDBACK entries tagged for your role
 ────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: backend-dev] [DATE: 2026-06-24] [TYPE: BLOCKER]
+
+Profile image upload path now validates client/server image type and size, and
+Cloudinary errors are classified before returning to the UI.
+Runtime Cloudinary probe reaches Cloudinary but credentials are rejected because
+`.env.local` has `CLOUDINARY_CLOUD_NAME=SAVESWITCH`; Cloudinary reports invalid
+cloud name. Replace it with the real cloud name or add `CLOUDINARY_URL`.
+────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: backend-dev] [DATE: 2026-06-24] [TYPE: COMPLETED]
+
+Cloudinary URL was added to `.env.local` and verified.
+Direct helper upload succeeds against Cloudinary.
+End-to-end `PATCH /users/me` check with a temporary authenticated user returned
+200 and a Cloudinary URL; temporary DB row and uploaded test asset were cleaned
+up after verification.
+────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: backend-dev] [DATE: 2026-06-24] [TYPE: BLOCKER]
+
+Browser was still hitting stale API processes; three duplicate Bun backends were
+listening on port 5000 and were replaced with one fresh `bun run dev` server.
+Current `CLOUDINARY_URL` loads, but Cloudinary upload API returns 403:
+missing permission for action `create`. Use an API key/secret with image asset
+upload/create permission, then restart the backend so `.env.local` is reloaded.
+────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: backend-dev] [DATE: 2026-06-24] [TYPE: COMPLETED]
+
+Updated Cloudinary URL now has upload/create permission.
+Backend was restarted with `bun run dev` so `.env.local` was reloaded.
+Verified direct Cloudinary helper upload and live `PATCH /users/me` against
+`localhost:5000`; both returned success, and temporary assets/rows were cleaned.
+────────────────────────────────────────

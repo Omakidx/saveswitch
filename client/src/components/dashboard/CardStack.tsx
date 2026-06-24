@@ -1,13 +1,10 @@
 "use client";
 
-interface Resource {
-  id: string;
-  type: "text" | "link" | "image";
-  content: string;
-  created_at: string;
-}
 
-import React, { useState, useRef } from "react";
+import ResourceCard, { Resource } from "./ResourceCard";
+
+import React, { useState, useRef, useEffect } from "react";
+import { motion } from 'framer-motion';
 import { PageData } from "./ResourceMiniPanel";
 
 interface CardStackProps {
@@ -15,6 +12,9 @@ interface CardStackProps {
   activePageId: string | null;
   isExpanded?: boolean;
   onPageSelect?: (id: string) => void;
+  resources?: Resource[];
+  onDeleteResource?: (id: string) => void;
+  onUpdateResourcePosition?: (id: string, x: number, y: number) => void;
 }
 
 const CARD_SHADOWS = [
@@ -25,17 +25,32 @@ const CARD_SHADOWS = [
   "0px 8px 24px 0px rgba(0,0,0,0.1), 0px 1px 2px 0px rgba(0,0,0,0.06)",
 ];
 
-export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect }: CardStackProps) {
+export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition }: CardStackProps) {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
+  const isDraggingCard = useRef(false);
+  const dragTimeout = useRef<any>(null);
 
-  // Sort pages so the active page is always rendered last (on top)
-  const sortedPages = [...pages].sort((a, b) => {
-    if (a.id === activePageId) return 1;
-    if (b.id === activePageId) return -1;
-    return 0;
-  });
+  const [winSize, setWinSize] = useState({ w: 1920, h: 1080 });
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    const updateSize = () => setWinSize({ w: window.innerWidth, h: window.innerHeight });
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, []);
+
+  // Rotate pages so the active page is at the end, preserving circular order
+  let sortedPages = [...pages];
+  const activeIndex = pages.findIndex((p) => p.id === activePageId);
+  if (activeIndex !== -1) {
+    const afterActive = pages.slice(activeIndex + 1);
+    const beforeActiveAndIncluding = pages.slice(0, activeIndex + 1);
+    sortedPages = [...afterActive, ...beforeActiveAndIncluding];
+  }
 
   // Limit stack size visually to 5
   const visiblePages = sortedPages.slice(-5);
@@ -74,13 +89,52 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
     setDragOffset({ x: 0, y: 0 });
   };
 
+  // Calculate bounding box for all resources to scale them inside minimized card
+  let contentScale = 1;
+  let centerX = 0;
+  let centerY = 0;
+
+  if (resources.length > 0) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    resources.forEach(r => {
+      const x = r.x ?? 100;
+      const y = r.y ?? 100;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      // Rough estimates of card dimensions (approx 320x400 max)
+      maxX = Math.max(maxX, x + 320);
+      maxY = Math.max(maxY, y + 400); 
+    });
+    
+    // Add padding
+    minX -= 100; minY -= 100;
+    maxX += 100; maxY += 100;
+
+    const contentW = maxX - minX;
+    const contentH = maxY - minY;
+    centerX = (minX + maxX) / 2;
+    centerY = (minY + maxY) / 2;
+
+    const topCardW = 662;
+    const topCardH = 372.38;
+
+    const scaleX = topCardW / contentW;
+    const scaleY = topCardH / contentH;
+    contentScale = Math.min(scaleX, scaleY, 1); // Cap scale at 1
+  } else {
+    // If no resources, default to center of screen
+    centerX = mounted ? winSize.w / 2 : 960;
+    centerY = mounted ? winSize.h / 2 : 540;
+    contentScale = 662 / (mounted ? Math.max(winSize.w, 662) : 1920);
+  }
+
   return (
     <div
-      className="relative flex items-center justify-center transition-all duration-500"
+      className="relative flex items-center justify-center transition-all duration-500 ease-out"
       style={{ width: isExpanded ? "100%" : 662, height: isExpanded ? "100%" : 372.38 }}
     >
       <div
-        className="relative transition-all duration-500"
+        className="relative transition-all duration-500 ease-out"
         style={{ width: isExpanded ? "100%" : 662, height: isExpanded ? "100%" : 372 }}
       >
         {visiblePages.map((page, index) => {
@@ -110,7 +164,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
           return (
             <div
               key={page.id}
-              className={`absolute ease-out ${isExpanded && !isTopCard ? "opacity-0 pointer-events-none scale-90" : "opacity-100"} ${isDragging && isTopCard ? "" : "transition-all duration-500"}`}
+              className={`absolute overflow-hidden ${isExpanded && !isTopCard ? "opacity-0 pointer-events-none scale-95 translate-y-8" : "opacity-100 scale-100 translate-y-0"} ${isDragging && isTopCard ? "" : "transition-all duration-500 ease-out"}`}
               style={
                 isExpanded && isTopCard
                   ? {
@@ -147,9 +201,56 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
               onPointerUp={isTopCard ? handlePointerUp : undefined}
               onPointerCancel={isTopCard ? handlePointerUp : undefined}
             >
-              {isExpanded && isTopCard && (
-                <div style={{ width: "100%", height: "100%", borderRadius: 0, overflow: "hidden" }}>
-                  {/* Inside content could go here in canvas mode */}
+              {isTopCard && (
+                <div 
+                  className={`relative ${isExpanded ? "w-full h-full pointer-events-auto" : "absolute left-1/2 top-1/2 pointer-events-none"}`}
+                  style={isExpanded ? {} : {
+                    width: 0,
+                    height: 0,
+                    transform: `scale(${contentScale}) translate(${-centerX}px, ${-centerY}px)`,
+                    transformOrigin: "0 0"
+                  }}
+                >
+                  {resources.length === 0 ? (
+                    <div className="w-full h-full flex items-center justify-center pointer-events-none">
+                      <span className="text-white/40 font-arimo text-lg">Use Ctrl+V or the + button to paste resources here.</span>
+                    </div>
+                  ) : (
+                    resources.map(res => (
+                        <motion.div 
+                          key={res.id} 
+                          className={`absolute w-[300px] flex-shrink-0 animate-fade-in ${isExpanded ? 'pointer-events-auto cursor-grab active:cursor-grabbing' : 'pointer-events-none'}`}
+                          style={{ zIndex: res.zIndex || 1 }}
+                        initial={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
+                        animate={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
+                        drag
+                        dragMomentum={false}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onDragStart={() => {
+                          isDraggingCard.current = true;
+                          if (dragTimeout.current) clearTimeout(dragTimeout.current);
+                        }}
+                        onDragEnd={(_, info) => {
+                          const newX = (res.x ?? 100) + info.offset.x;
+                          const newY = (res.y ?? 100) + info.offset.y;
+                          if (onUpdateResourcePosition) {
+                            onUpdateResourcePosition(res.id, Math.round(newX), Math.round(newY));
+                          }
+                          dragTimeout.current = setTimeout(() => {
+                            isDraggingCard.current = false;
+                          }, 100);
+                        }}
+                        onClickCapture={(e) => {
+                          if (isDraggingCard.current) {
+                            e.stopPropagation();
+                            e.preventDefault();
+                          }
+                        }}
+                      >
+                        <ResourceCard resource={res} onDelete={onDeleteResource} />
+                      </motion.div>
+                    ))
+                  )}
                 </div>
               )}
             </div>

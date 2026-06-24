@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Image from "next/image";
 
 import { PageData } from "./ResourceMiniPanel";
@@ -49,30 +50,35 @@ export default function DashboardSidebar({
   onToggleCollapse,
   onDeletePage,
 }: DashboardSidebarProps) {
+  const router = useRouter();
   const [isProfileExpanded, setIsProfileExpanded] = useState(false);
 
   if (collapsed) {
     return (
-      <aside
-        className="relative flex flex-col shrink-0 h-screen"
-        style={{ width: 48, background: "var(--color-sidebar-bg)" }}
+      <button
+        type="button"
+        onClick={onToggleCollapse}
+        className="fixed z-50 flex items-center justify-center cursor-pointer border border-white/10 transition-all duration-200 hover:scale-110 hover:shadow-xl active:scale-95"
+        style={{
+          width: 48,
+          height: 48,
+          background: "#191818",
+          borderRadius: 24,
+          left: 24,
+          bottom: 24,
+        }}
+        aria-label="Expand sidebar"
       >
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          className="flex items-center justify-center w-full h-16 cursor-pointer border-none bg-transparent hover:opacity-80 transition-opacity duration-200"
-          aria-label="Expand sidebar"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/icons/icon-layout-right.svg"
-            alt=""
-            width={20}
-            height={20}
-            className="opacity-60"
-          />
-        </button>
-      </aside>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/icons/icon-layout-right.svg"
+          alt=""
+          width={20}
+          height={20}
+          className="opacity-80"
+          style={{ filter: "brightness(0) invert(1)" }}
+        />
+      </button>
     );
   }
 
@@ -161,6 +167,25 @@ export default function DashboardSidebar({
                   borderColor: "rgba(255, 255, 255, 0.1)",
                 }}
               >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsProfileExpanded(false);
+                    router.push("/dashboard/profile");
+                  }}
+                  className="group flex items-center gap-2.5 px-3 py-2 text-sm cursor-pointer border-none bg-transparent text-white/90 hover:bg-white/10 hover:text-white rounded-lg transition-all duration-200 text-left w-full font-arimo"
+                >
+                  <img
+                    src="/icons/icon-profile.svg"
+                    alt=""
+                    width={14}
+                    height={14}
+                    className="opacity-70 group-hover:opacity-100 transition-all duration-200"
+                    style={{ filter: "brightness(0) invert(1)" }}
+                  />
+                  Profile
+                </button>
+                <div className="h-[1px] w-full bg-white/10 my-1"></div>
                 <button
                   type="button"
                   onClick={() => {
@@ -301,12 +326,10 @@ function SidebarDateEntry({
         style={{
           height: 32,
           padding: "0 8px",
-          background: isExpanded
+          background: isSelected
             ? "linear-gradient(180deg, rgba(51,51,51,1) 0%, rgba(29,29,29,0.4) 100%)"
-            : isSelected
-              ? "rgba(255,255,255,0.05)"
-              : "transparent",
-          border: isExpanded
+            : "transparent",
+          border: isSelected
             ? "1px solid var(--color-surface-border)"
             : "1px solid transparent",
           borderRadius: 6,
@@ -378,7 +401,7 @@ function SidebarDateEntry({
                     e.preventDefault();
                     setContextMenu({ pageId: page.id, x: e.clientX, y: e.clientY });
                   }}
-                  className={`flex items-center gap-2 rounded-md cursor-pointer hover:bg-white/10 transition-colors duration-150 w-full ${page.id === activePageId ? "bg-white/10" : ""}`}
+                  className="flex items-center gap-2 rounded-md cursor-pointer hover:bg-white/10 transition-colors duration-150 w-full"
                   style={{
                     padding: "0 8px",
                     height: 28,
