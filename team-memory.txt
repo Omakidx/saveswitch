@@ -62,3 +62,13 @@ Backend was restarted with `bun run dev` so `.env.local` was reloaded.
 Verified direct Cloudinary helper upload and live `PATCH /users/me` against
 `localhost:5000`; both returned success, and temporary assets/rows were cleaned.
 ────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: backend-dev] [DATE: 2026-06-25] [TYPE: COMPLETED]
+
+Resource create and move endpoints now normalize canvas coordinates to
+PostgreSQL integer range before saving, so decimal paste positions no longer
+fail inserts. API errors for resource saves now return safe public messages and
+HTTP statuses instead of raw Drizzle/SQL details. Verified an authenticated
+paste with `y: 299.5` saved as `300`, then deleted the temporary resource.
+────────────────────────────────────────

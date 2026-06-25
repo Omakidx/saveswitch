@@ -1,6 +1,10 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
+
+export interface InfiniteCanvasRef {
+  panTo: (x: number, y: number) => void;
+}
 
 interface InfiniteCanvasProps {
   children: React.ReactNode;
@@ -9,23 +13,48 @@ interface InfiniteCanvasProps {
   canvasOffsetRef?: React.MutableRefObject<{ x: number, y: number }>;
 }
 
-export default function InfiniteCanvas({
+const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   children,
   isActive,
   canvasColor = "var(--color-app-bg)",
   canvasOffsetRef,
-}: InfiniteCanvasProps) {
+}, ref) => {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
   const [isDragging, setIsDragging] = useState(false);
+  const [isAnimatingToTarget, setIsAnimatingToTarget] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
+  const animationTimeout = useRef<any>(null);
 
   // Reset offset when toggling canvas mode off
   useEffect(() => {
     if (!isActive) {
       setOffset({ x: 0, y: 0 });
+      setZoom(1);
       if (canvasOffsetRef) canvasOffsetRef.current = { x: 0, y: 0 };
     }
   }, [isActive, canvasOffsetRef]);
+
+  useImperativeHandle(ref, () => ({
+    panTo: (x: number, y: number) => {
+      setIsAnimatingToTarget(true);
+      if (animationTimeout.current) clearTimeout(animationTimeout.current);
+
+      // A typical resource card is 300px wide and around 200px tall
+      // Center it perfectly using half dimensions
+      const targetOffset = {
+        x: window.innerWidth / 2 - (x + 150),
+        y: window.innerHeight / 2 - (y + 100),
+      };
+      setOffset(targetOffset);
+      setZoom(1); // Optional: reset zoom to 1 when panning to a specific resource
+      if (canvasOffsetRef) canvasOffsetRef.current = targetOffset;
+
+      animationTimeout.current = setTimeout(() => {
+        setIsAnimatingToTarget(false);
+      }, 800); // 800ms matches the transition duration
+    }
+  }));
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (!isActive) return;
@@ -50,6 +79,23 @@ export default function InfiniteCanvas({
     (e.target as HTMLElement).releasePointerCapture(e.pointerId);
   };
 
+  const handleWheel = (e: React.WheelEvent) => {
+    if (!isActive) return;
+    if (e.ctrlKey || e.metaKey) {
+      // Zoom
+      const delta = e.deltaY * -0.002;
+      setZoom((z) => Math.min(Math.max(z + delta, 0.2), 3));
+    } else {
+      // Pan
+      const newOffset = {
+        x: offset.x - e.deltaX,
+        y: offset.y - e.deltaY,
+      };
+      setOffset(newOffset);
+      if (canvasOffsetRef) canvasOffsetRef.current = newOffset;
+    }
+  };
+
   return (
     <div
       className={`absolute inset-0 overflow-hidden transition-colors duration-500 ease-out ${
@@ -59,25 +105,26 @@ export default function InfiniteCanvas({
         zIndex: 0,
         backgroundColor: isActive ? canvasColor : "transparent",
         backgroundImage: isActive ? "radial-gradient(circle, rgba(0, 0, 0, 0.15) 1.5px, transparent 1.5px)" : "none",
-        backgroundSize: "24px 24px",
-        backgroundPosition: `${offset.x}px ${offset.y}px`,
+        backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
+        backgroundPosition: `calc(50% + ${offset.x}px) calc(50% + ${offset.y}px)`,
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onWheel={handleWheel}
     >
       <div
         className="w-full h-full flex items-center justify-center"
         style={{
           transform: `translate(${offset.x}px, ${offset.y}px)`,
-          transition: isDragging || isActive ? "none" : "transform 0.3s ease-out",
+          transition: isAnimatingToTarget ? "transform 0.8s cubic-bezier(0.22, 1, 0.36, 1)" : (isDragging || isActive ? "none" : "transform 0.5s ease-out"),
         }}
       >
         <div 
-          className="transition-all duration-500 ease-out"
+          className="transition-all duration-300 ease-out origin-center"
           style={{ 
-            transform: isActive ? "scale(1)" : "scale(1)",
+            transform: isActive ? `scale(${zoom})` : "scale(1)",
             width: "100%",
             height: "100%"
           }}
@@ -85,6 +132,35 @@ export default function InfiniteCanvas({
           {children}
         </div>
       </div>
+
+      {/* ── Zoom Controls ── */}
+      {isActive && (
+        <div 
+          className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 bg-[#1D1D1D] rounded-[20px] px-2 py-1 flex items-center gap-3 shadow-[0_8px_32px_rgba(0,0,0,0.4)] border border-white/10"
+          onPointerDown={(e) => e.stopPropagation()}
+          onWheel={(e) => e.stopPropagation()}
+        >
+          <button 
+            className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
+            onClick={() => setZoom(z => Math.max(z - 0.1, 0.2))}
+            title="Zoom Out"
+          >
+            -
+          </button>
+          <span className="text-white font-medium min-w-[3.5rem] text-center text-[13px]">
+            {Math.round(zoom * 100)}%
+          </span>
+          <button 
+            className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
+            onClick={() => setZoom(z => Math.min(z + 0.1, 3))}
+            title="Zoom In"
+          >
+            +
+          </button>
+        </div>
+      )}
     </div>
   );
-}
+});
+
+export default InfiniteCanvas;

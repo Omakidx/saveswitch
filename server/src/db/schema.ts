@@ -3,6 +3,7 @@ import { pgTable, text, timestamp, uuid, integer } from 'drizzle-orm/pg-core';
 export const users = pgTable('users', {
   id: text('id').primaryKey(), // using Google sub ID which is a string
   email: text('email').notNull().unique(),
+  username: text('username').unique(), // null for legacy users until they update
   name: text('name').notNull(),
   picture: text('picture').notNull(),
   visibility: text('visibility', { enum: ['public', 'private'] }).default('public').notNull(),
@@ -20,7 +21,7 @@ export const pages = pgTable('pages', {
 export const resources = pgTable('resources', {
   id: uuid('id').primaryKey().defaultRandom(),
   pageId: uuid('page_id').references(() => pages.id, { onDelete: 'cascade' }).notNull(),
-  type: text('type', { enum: ['link', 'image', 'text', 'pdf'] }).notNull(),
+  type: text('type', { enum: ['link', 'image', 'text', 'pdf', 'file'] }).notNull(),
   content: text('content').notNull(), // Actual URL, text snippet, or Cloudinary URL
   title: text('title'), // For link previews or PDF filenames
   description: text('description'), // For link previews

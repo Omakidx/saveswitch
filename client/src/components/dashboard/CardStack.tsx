@@ -15,6 +15,8 @@ interface CardStackProps {
   resources?: Resource[];
   onDeleteResource?: (id: string) => void;
   onUpdateResourcePosition?: (id: string, x: number, y: number) => void;
+  highlightedResourceId?: string | null;
+  readOnly?: boolean;
 }
 
 const CARD_SHADOWS = [
@@ -25,7 +27,7 @@ const CARD_SHADOWS = [
   "0px 8px 24px 0px rgba(0,0,0,0.1), 0px 1px 2px 0px rgba(0,0,0,0.06)",
 ];
 
-export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition }: CardStackProps) {
+export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition, highlightedResourceId, readOnly = false }: CardStackProps) {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
@@ -164,7 +166,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
           return (
             <div
               key={page.id}
-              className={`absolute overflow-hidden ${isExpanded && !isTopCard ? "opacity-0 pointer-events-none scale-95 translate-y-8" : "opacity-100 scale-100 translate-y-0"} ${isDragging && isTopCard ? "" : "transition-all duration-500 ease-out"}`}
+              className={`absolute ${!isExpanded ? "overflow-hidden" : ""} ${isExpanded && !isTopCard ? "opacity-0 pointer-events-none scale-95 translate-y-8" : "opacity-100 scale-100 translate-y-0"} ${isDragging && isTopCard ? "" : "transition-all duration-500 ease-out"}`}
               style={
                 isExpanded && isTopCard
                   ? {
@@ -213,17 +215,19 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
                 >
                   {resources.length === 0 ? (
                     <div className="w-full h-full flex items-center justify-center pointer-events-none">
-                      <span className="text-white/40 font-arimo text-lg">Use Ctrl+V or the + button to paste resources here.</span>
+                      <span className="text-white/40 font-arimo text-lg">
+                        {readOnly ? "This page is empty." : "Use Ctrl+V or the + button to paste resources here."}
+                      </span>
                     </div>
                   ) : (
                     resources.map(res => (
                         <motion.div 
                           key={res.id} 
-                          className={`absolute w-[300px] flex-shrink-0 animate-fade-in ${isExpanded ? 'pointer-events-auto cursor-grab active:cursor-grabbing' : 'pointer-events-none'}`}
+                          className={`absolute w-[300px] flex-shrink-0 animate-fade-in transition-[box-shadow] duration-500 rounded-[12px] ${isExpanded ? 'pointer-events-auto cursor-grab active:cursor-grabbing' : 'pointer-events-none'} ${res.id === highlightedResourceId ? 'ring-4 ring-[#EAB308]/80 shadow-[0_0_30px_rgba(234,179,8,0.5)]' : ''}`}
                           style={{ zIndex: res.zIndex || 1 }}
-                        initial={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
-                        animate={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
-                        drag
+                          initial={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
+                          animate={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
+                          drag={!readOnly}
                         dragMomentum={false}
                         onPointerDown={(e) => e.stopPropagation()}
                         onDragStart={() => {
@@ -247,7 +251,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
                           }
                         }}
                       >
-                        <ResourceCard resource={res} onDelete={onDeleteResource} />
+                        <ResourceCard resource={res} onDelete={onDeleteResource} readOnly={readOnly} />
                       </motion.div>
                     ))
                   )}

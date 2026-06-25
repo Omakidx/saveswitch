@@ -7,8 +7,9 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import CardStack from "@/components/dashboard/CardStack";
 import ResourceMiniPanel, { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import FloatingActionButton from "@/components/dashboard/FloatingActionButton";
-import InfiniteCanvas from "@/components/dashboard/InfiniteCanvas";
+import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
 import CategorySwitch, { Category } from "@/components/dashboard/CategorySwitch";
+import ResourceNavigator from "@/components/dashboard/ResourceNavigator";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
 
@@ -95,6 +96,31 @@ function groupPagesByDate(pages: PageData[]): DateGroup[] {
     }));
 }
 
+function sanitizeErrorToast(message: string): string {
+  const technicalPatterns = [
+    /failed query/i,
+    /params:/i,
+    /\b(insert|select|update|delete)\b[\s\S]*\b(from|into|set|where)\b/i,
+    /drizzle/i,
+    /postgres/i,
+    /syntax error/i,
+  ];
+
+  if (message.length > 180 || technicalPatterns.some((pattern) => pattern.test(message))) {
+    return "Something went wrong. Please try again.";
+  }
+
+  return message;
+}
+
+function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error !== "string" || error.trim().length === 0) {
+    return fallback;
+  }
+
+  return sanitizeErrorToast(error.trim());
+}
+
 /* ── Dashboard Page ── */
 export default function DashboardPage() {
   const [user, setUser] = useState<User | null>(null);
@@ -105,7 +131,8 @@ export default function DashboardPage() {
 
   const showToast = useCallback((message: string, type: ToastMessage['type'] = 'error') => {
     const id = crypto.randomUUID();
-    setToasts((prev) => [...prev, { id, message, type }]);
+    const safeMessage = type === "error" ? sanitizeErrorToast(message) : message;
+    setToasts((prev) => [...prev, { id, message: safeMessage, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4000);
@@ -119,7 +146,7 @@ export default function DashboardPage() {
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isCanvasMode, setIsCanvasMode] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<Category>("video");
+  const [activeCategory, setActiveCategory] = useState<Category>("target");
 
   // Pages state
   const [pages, setPages] = useState<PageData[]>([]);
@@ -129,6 +156,18 @@ export default function DashboardPage() {
   const [resources, setResources] = useState<Resource[]>([]);
   const [isPasting, setIsPasting] = useState(false);
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
+  const canvasRef = useRef<InfiniteCanvasRef>(null);
+  const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
+
+  const handlePanToResource = useCallback((id: string, x: number, y: number) => {
+    if (canvasRef.current) {
+      canvasRef.current.panTo(x, y);
+    }
+    setHighlightedResourceId(id);
+    setTimeout(() => {
+      setHighlightedResourceId(null);
+    }, 3000);
+  }, []);
 
   // Fetch resources when active page changes
   useEffect(() => {
@@ -154,21 +193,39 @@ export default function DashboardPage() {
     fetchResources();
   }, [activePageId]);
 
-  /* ── Fetch user & resources on mount ── */
+  /* ── Fetch user on mount ── */
   useEffect(() => {
-    async function init() {
+    async function initUser() {
       try {
-        // Fetch user info
         const meRes = await fetch(`${API_BASE}/auth/me`, {
           credentials: "include",
         });
         const meData = await meRes.json();
         if (meData.authenticated) {
           setUser(meData.user);
+          if (meData.user.visibility) {
+            setVisibility(meData.user.visibility as "private" | "public");
+          }
         }
+      } catch (err) {
+        console.error("Error fetching user", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    initUser();
+  }, []);
 
-        // Fetch pages
-        const resRes = await fetch(`${API_BASE}/pages`, {
+  /* ── Fetch pages when visibility changes ── */
+  useEffect(() => {
+    async function fetchPages() {
+      // Clear current state when switching workspace
+      setPages([]);
+      setActivePageId(null);
+      setResources([]);
+      
+      try {
+        const resRes = await fetch(`${API_BASE}/pages?visibility=${visibility}`, {
           credentials: "include",
         });
         if (resRes.ok) {
@@ -185,13 +242,22 @@ export default function DashboardPage() {
           setPages(formattedPages);
           
           if (formattedPages.length > 0) {
-            setActivePageId(formattedPages[formattedPages.length - 1].id);
+            const savedPageId = localStorage.getItem(`saveswitch-active-page-${visibility}`);
+            const pageToSet = formattedPages.some((p: any) => p.id === savedPageId) 
+              ? savedPageId 
+              : formattedPages[formattedPages.length - 1].id;
+              
+            setActivePageId(pageToSet);
+            localStorage.setItem(`saveswitch-active-page-${visibility}`, pageToSet);
             const groups = groupPagesByDate(formattedPages);
             if (groups.length > 0) {
-              setSelectedDate(groups[0].date);
-              const todayGroup = groups.find(g => g.label === "Today");
-              if (todayGroup) {
-                setExpandedDates(new Set([todayGroup.date]));
+              const activePage = formattedPages.find((p: any) => p.id === pageToSet);
+              const targetDate = activePage ? activePage.createdAt.split("T")[0] : groups[0].date;
+              setSelectedDate(targetDate);
+              
+              const activeGroup = groups.find(g => g.date === targetDate);
+              if (activeGroup) {
+                setExpandedDates(new Set([activeGroup.date]));
               } else {
                 setExpandedDates(new Set());
               }
@@ -199,13 +265,11 @@ export default function DashboardPage() {
           }
         }
       } catch (err) {
-        console.error("Dashboard init error:", err);
-      } finally {
-        setLoading(false);
+        console.error("Failed to fetch pages", err);
       }
     }
-    init();
-  }, []);
+    fetchPages();
+  }, [visibility]);
 
   /* ── Grouped resources ── */
   const dateGroups = groupPagesByDate(pages);
@@ -269,7 +333,7 @@ export default function DashboardPage() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ color: randomColor, name: newName }),
+        body: JSON.stringify({ color: randomColor, name: newName, visibility }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -282,6 +346,8 @@ export default function DashboardPage() {
           };
           setPages((prev) => [...prev, newPage]);
           setActivePageId(newPage.id);
+          localStorage.setItem(`saveswitch-active-page-${visibility}`, newPage.id);
+          setIsCanvasMode(true);
           setExpandedDates((prev) => new Set(prev).add(todayPrefix));
         } else {
           showToast(`Failed to add page: ${data.error || 'Unknown error'}`, 'error');
@@ -291,11 +357,18 @@ export default function DashboardPage() {
       console.error("Failed to add page", err);
       showToast("A network error occurred while adding the page.", 'error');
     }
-  }, [pages, showToast]);
+  }, [pages, showToast, visibility]);
 
   const handlePageSelect = useCallback((id: string) => {
     setActivePageId(id);
-  }, []);
+    localStorage.setItem(`saveswitch-active-page-${visibility}`, id);
+    setIsCanvasMode(true);
+  }, [visibility]);
+
+  const handleCardSwipe = useCallback((id: string) => {
+    setActivePageId(id);
+    localStorage.setItem(`saveswitch-active-page-${visibility}`, id);
+  }, [visibility]);
 
   const executeDeletePage = useCallback(async (id: string) => {
     setPages((prev) => {
@@ -304,9 +377,12 @@ export default function DashboardPage() {
       if (id === activePageId) {
         if (filtered.length > 0) {
           // Default to the last created one or the first one
-          setActivePageId(filtered[filtered.length - 1].id);
+          const newId = filtered[filtered.length - 1].id;
+          setActivePageId(newId);
+          localStorage.setItem(`saveswitch-active-page-${visibility}`, newId);
         } else {
           setActivePageId(null);
+          localStorage.removeItem(`saveswitch-active-page-${visibility}`);
         }
       }
       return filtered;
@@ -325,7 +401,7 @@ export default function DashboardPage() {
       console.error("Failed to delete page", err);
       showToast("A network error occurred while deleting the page.", 'error');
     }
-  }, [activePageId, showToast]);
+  }, [activePageId, showToast, visibility]);
 
   const handleDeletePage = useCallback((id: string) => {
     setConfirmModal({
@@ -424,6 +500,10 @@ export default function DashboardPage() {
   }, []);
 
   const handlePaste = useCallback(async () => {
+    if (!isCanvasMode) {
+      showToast("Please enter a canvas to paste resources.", "info");
+      return;
+    }
     if (!activePageId) {
       showToast("Please select a page first to paste resources.", "info");
       return;
@@ -476,9 +556,9 @@ export default function DashboardPage() {
         showToast("Failed to read from clipboard. Allow clipboard permissions.", "error");
       }
     }
-  }, [activePageId, showToast]);
+  }, [activePageId, showToast, isCanvasMode]);
 
-  const processPaste = async (type: 'link'|'image'|'text'|'pdf', content: string, title?: string) => {
+  const processPaste = async (type: 'link'|'image'|'text'|'pdf'|'file', content: string, title?: string) => {
     if (!activePageId) return;
     setIsPasting(true);
     showToast(`Pasting ${type}...`, 'info');
@@ -488,8 +568,9 @@ export default function DashboardPage() {
     const BOX_H = 340; // Generous bounding box for cards
     
     // Adjust by subtracting the canvas pan offset so it spawns exactly in the center of the user's current view
-    let x = Math.round((window.innerWidth / 2) - (BOX_W / 2)) - canvasOffsetRef.current.x;
-    let y = Math.round((window.innerHeight / 2) - (BOX_H / 2)) - canvasOffsetRef.current.y;
+    // Ensure the final values are integers to avoid database errors
+    let x = Math.round((window.innerWidth / 2) - (BOX_W / 2) - canvasOffsetRef.current.x);
+    let y = Math.round((window.innerHeight / 2) - (BOX_H / 2) - canvasOffsetRef.current.y);
     
     let isOccupied = true;
     let attempts = 0;
@@ -537,7 +618,7 @@ export default function DashboardPage() {
         setResources(prev => [...prev, data.resource]);
         showToast(`Resource saved successfully!`, 'success');
       } else {
-        showToast(`Failed to save: ${data.error}`, 'error');
+        showToast(getApiErrorMessage(data.error, "Unable to save this resource. Please try again."), 'error');
       }
     } catch (err) {
       console.error("Paste upload failed", err);
@@ -547,11 +628,35 @@ export default function DashboardPage() {
     }
   };
 
+  const handleFileUploads = (files: File[]) => {
+    if (!isCanvasMode) {
+      showToast("Please enter a canvas to upload resources.", "info");
+      return;
+    }
+    if (!activePageId) {
+      showToast("Please select a page first to upload resources.", "info");
+      return;
+    }
+
+    for (const file of files) {
+      const reader = new FileReader();
+      if (file.type.startsWith('image/')) {
+        reader.onloadend = () => processPaste("image", reader.result as string, file.name);
+      } else if (file.type === 'application/pdf') {
+        reader.onloadend = () => processPaste("pdf", reader.result as string, file.name);
+      } else {
+        reader.onloadend = () => processPaste("file", reader.result as string, file.name);
+      }
+      reader.readAsDataURL(file);
+    }
+  };
+
   useEffect(() => {
     const handleGlobalPaste = (e: ClipboardEvent) => {
       // Ignore if typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (!activePageId) return;
+      if (!isCanvasMode) return;
       
       const items = Array.from(e.clipboardData?.items || []);
       if (items.length === 0) return;
@@ -562,7 +667,7 @@ export default function DashboardPage() {
           const file = item.getAsFile();
           if (file) {
             const reader = new FileReader();
-            reader.onloadend = () => processPaste("image", reader.result as string);
+            reader.onloadend = () => processPaste("image", reader.result as string, file.name);
             reader.readAsDataURL(file);
             processed = true;
           }
@@ -580,6 +685,15 @@ export default function DashboardPage() {
             processPaste(isUrl ? "link" : "text", text.trim());
           });
           processed = true;
+        } else {
+          // If we got a generic file from the clipboard (some browsers support this)
+          const file = item.getAsFile();
+          if (file) {
+            const reader = new FileReader();
+            reader.onloadend = () => processPaste("file", reader.result as string, file.name);
+            reader.readAsDataURL(file);
+            processed = true;
+          }
         }
       }
       
@@ -587,10 +701,20 @@ export default function DashboardPage() {
         e.preventDefault(); // Stop default pasting if we handled it
       }
     };
+
+    const handleUploadEvent = (e: any) => {
+      if (e.detail && e.detail.files) {
+        handleFileUploads(e.detail.files);
+      }
+    };
     
     window.addEventListener('paste', handleGlobalPaste);
-    return () => window.removeEventListener('paste', handleGlobalPaste);
-  }, [activePageId, resources]);
+    window.addEventListener('saveswitch-upload', handleUploadEvent);
+    return () => {
+       window.removeEventListener('paste', handleGlobalPaste);
+       window.removeEventListener('saveswitch-upload', handleUploadEvent);
+    };
+  }, [activePageId, resources, isCanvasMode]);
 
   /* ── Active Page state ── */
   const activePage = pages.find(p => p.id === activePageId);
@@ -623,6 +747,13 @@ export default function DashboardPage() {
       <main
         className="flex-1 relative flex flex-col h-screen overflow-hidden"
         style={{ background: "var(--color-app-bg)" }}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault();
+          if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            handleFileUploads(Array.from(e.dataTransfer.files));
+          }
+        }}
       >
         <div className="relative flex-1 flex flex-col overflow-hidden bg-black">
           {/* ── Private/Public Toggle (top center) ── */}
@@ -640,18 +771,26 @@ export default function DashboardPage() {
             <CategorySwitch activeCategory={activeCategory} onChange={setActiveCategory} />
           </div>
 
+          {/* ── Resource Navigator (top left) ── */}
+          <ResourceNavigator 
+            resources={resources} 
+            onSelectResource={handlePanToResource} 
+            isActive={isCanvasMode} 
+          />
+
           {/* ── Workspace / Card Stack (centered) ── */}
-          <InfiniteCanvas isActive={isCanvasMode} canvasColor={activePage?.color || "var(--color-app-bg)"} canvasOffsetRef={canvasOffsetRef}>
+          <InfiniteCanvas ref={canvasRef} isActive={isCanvasMode} canvasColor={activePage?.color || "var(--color-app-bg)"} canvasOffsetRef={canvasOffsetRef}>
             <div className="flex-1 flex items-center justify-center h-full w-full">
             {pages.length > 0 ? (
               <CardStack 
                 pages={pages}
                 activePageId={activePageId}
                 isExpanded={isCanvasMode} 
-                onPageSelect={handlePageSelect}
+                onPageSelect={handleCardSwipe}
                 resources={activeCategory === 'target' ? resources : resources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true)}
                 onDeleteResource={handleDeleteResource}
                 onUpdateResourcePosition={handleUpdateResourcePosition}
+                highlightedResourceId={highlightedResourceId}
               />
             ) : (
               <div className="flex flex-col items-center justify-center w-full h-full">
@@ -707,6 +846,7 @@ export default function DashboardPage() {
             key={toast.id}
             className="pointer-events-auto px-5 py-3.5 rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.3)] flex items-center gap-3"
             style={{
+              maxWidth: "min(420px, calc(100vw - 32px))",
               background:
                 toast.type === "error"
                   ? "rgba(50, 20, 20, 0.65)"
@@ -732,6 +872,7 @@ export default function DashboardPage() {
               className="font-arimo text-[14px] leading-relaxed tracking-wide"
               style={{
                 color: toast.type === "error" ? "rgba(255, 210, 210, 1)" : "white",
+                overflowWrap: "anywhere",
               }}
             >
               {toast.message}

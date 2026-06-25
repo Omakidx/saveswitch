@@ -144,13 +144,13 @@ export async function uploadImage(base64Image: string): Promise<string> {
 
 const RESOURCE_UPLOAD_FOLDER = process.env.CLOUDINARY_RESOURCE_FOLDER || 'saveswitch/resources'
 
-export async function uploadResource(base64Data: string, type: 'image' | 'pdf'): Promise<string> {
+export async function uploadResource(base64Data: string, type: 'image' | 'pdf' | 'file'): Promise<string> {
   try {
     configureCloudinary()
     
     const result = await cloudinary.uploader.upload(base64Data, {
       folder: RESOURCE_UPLOAD_FOLDER,
-      resource_type: 'auto',
+      resource_type: type === 'image' ? 'image' : 'raw',
     })
 
     return result.secure_url
