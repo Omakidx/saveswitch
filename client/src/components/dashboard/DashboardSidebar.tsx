@@ -33,6 +33,7 @@ interface DashboardSidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   onDeletePage: (pageId: string) => void;
+  readOnly?: boolean;
 }
 
 export default function DashboardSidebar({
@@ -49,6 +50,7 @@ export default function DashboardSidebar({
   collapsed,
   onToggleCollapse,
   onDeletePage,
+  readOnly = false,
 }: DashboardSidebarProps) {
   const router = useRouter();
   const [isProfileExpanded, setIsProfileExpanded] = useState(false);
@@ -140,17 +142,47 @@ export default function DashboardSidebar({
             onPageUpdateName={onPageUpdateName}
             activePageId={activePageId}
             onDeletePage={onDeletePage}
+            readOnly={readOnly}
           />
         ))}
       </nav>
 
-      {/* ── User Profile Footer ── */}
-      {user && (
+      {/* ── User Profile Footer / Sign Up CTA ── */}
+      {readOnly ? (
+        <div className="p-3 w-full" style={{ marginTop: "auto" }}>
+          <div className="flex flex-col gap-3.5 p-3.5 rounded-[12px] bg-[#1C1C1C] border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.2)]">
+            <div className="flex gap-2.5 items-start">
+              {/* Info SVG */}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-white/50 shrink-0 mt-[2px]"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              <span className="text-white/70 font-arimo text-[12px] leading-[16px]">You are currently exploring a public workspace.</span>
+            </div>
+            
+            <div className="flex flex-col gap-2 mt-1">
+              <div className="flex gap-2.5 items-start">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-[#5DF286] shrink-0 mt-[2px]"><polyline points="20 6 9 17 4 12"/></svg>
+                <span className="text-white/40 font-arimo text-[11px] leading-[14px]">Read-only access to shared resources</span>
+              </div>
+              <div className="flex gap-2.5 items-start">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-[#5DF286] shrink-0 mt-[2px]"><polyline points="20 6 9 17 4 12"/></svg>
+                <span className="text-white/40 font-arimo text-[11px] leading-[14px]">Pan, zoom, and view any content safely</span>
+              </div>
+              <div className="flex gap-2.5 items-start">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-[#5DF286] shrink-0 mt-[2px]"><polyline points="20 6 9 17 4 12"/></svg>
+                <span className="text-white/40 font-arimo text-[11px] leading-[14px]">Create your own canvas to start saving</span>
+              </div>
+            </div>
+
+            <a href="/register" className="w-full py-2 mt-1 bg-[#282828] hover:bg-[#333333] rounded-md text-[#E0E0E0] font-arimo font-semibold text-[12px] text-center transition-colors no-underline shadow-sm border border-white/5">
+              Get Started
+            </a>
+          </div>
+        </div>
+      ) : user ? (
         <div 
           className="p-2 pb-2 relative" 
           style={{ marginTop: "auto" }}
-          onMouseEnter={() => setIsProfileExpanded(true)}
-          onMouseLeave={() => setIsProfileExpanded(false)}
+          onMouseEnter={() => !readOnly && setIsProfileExpanded(true)}
+          onMouseLeave={() => !readOnly && setIsProfileExpanded(false)}
         >
           {/* Profile Menu Popup Wrapper (maintains hover state across gap) */}
           {isProfileExpanded && (
@@ -273,12 +305,25 @@ export default function DashboardSidebar({
             </div>
           </div>
         </div>
-      )}
+      ) : null}
     </aside>
   );
 }
 
 /* ── Sidebar Date Entry (internal) ── */
+
+interface DateEntryProps {
+  group: DateGroup;
+  isExpanded: boolean;
+  isSelected: boolean;
+  onToggle: () => void;
+  onSelect: () => void;
+  onPageSelect: (pageId: string) => void;
+  onPageUpdateName: (pageId: string, newName: string) => void;
+  activePageId: string | null;
+  onDeletePage: (pageId: string) => void;
+  readOnly?: boolean;
+}
 
 function SidebarDateEntry({
   group,
@@ -290,17 +335,8 @@ function SidebarDateEntry({
   onPageUpdateName,
   activePageId,
   onDeletePage,
-}: {
-  group: DateGroup;
-  isExpanded: boolean;
-  isSelected: boolean;
-  onToggle: () => void;
-  onSelect: () => void;
-  onPageSelect: (pageId: string) => void;
-  onPageUpdateName: (pageId: string, newName: string) => void;
-  activePageId: string | null;
-  onDeletePage: (pageId: string) => void;
-}) {
+  readOnly = false,
+}: DateEntryProps) {
   const hasPages = group.pages.length > 0;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -393,11 +429,13 @@ function SidebarDateEntry({
                     onPageSelect(page.id);
                   }}
                   onDoubleClick={(e) => {
+                    if (readOnly) return;
                     e.stopPropagation();
                     setEditingId(page.id);
                     setEditName(page.name);
                   }}
                   onContextMenu={(e) => {
+                    if (readOnly) return;
                     e.preventDefault();
                     setContextMenu({ pageId: page.id, x: e.clientX, y: e.clientY });
                   }}
@@ -406,6 +444,7 @@ function SidebarDateEntry({
                     padding: "0 8px",
                     height: 28,
                     borderRadius: 6,
+                    background: activePageId === page.id ? "rgba(255, 255, 255, 0.1)" : "transparent",
                   }}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}

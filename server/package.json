@@ -19,6 +19,7 @@
     "@elysiajs/cookie": "^0.8.0",
     "@elysiajs/cors": "^1.4.2",
     "@elysiajs/jwt": "^1.4.2",
+    "@elysiajs/websocket": "^0.2.8",
     "@neondatabase/serverless": "^1.1.0",
     "cloudinary": "^2.10.0",
     "drizzle-orm": "^0.45.2",
