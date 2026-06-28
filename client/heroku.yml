@@ -2,8 +2,8 @@ build:
   docker:
     web: Dockerfile
   config:
-    NEXT_PUBLIC_API_BASE: https://saveswitch-api-169d7102075a.herokuapp.com
-    NEXT_PUBLIC_API_URL: https://saveswitch-api-169d7102075a.herokuapp.com
+    NEXT_PUBLIC_API_BASE: https://api.saveswitch.xyz
+    NEXT_PUBLIC_API_URL: https://api.saveswitch.xyz
 
 run:
   web: bun --bun next start -p ${PORT:-5173}
