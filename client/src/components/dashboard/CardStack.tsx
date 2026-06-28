@@ -32,15 +32,15 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
   const [isDragging, setIsDragging] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
   const isDraggingCard = useRef(false);
-  const dragTimeout = useRef<any>(null);
+  const dragTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [winSize, setWinSize] = useState({ w: 1920, h: 1080 });
-  const [mounted, setMounted] = useState(false);
+  const [winSize, setWinSize] = useState(() => {
+    if (typeof window === "undefined") return { w: 1920, h: 1080 };
+    return { w: window.innerWidth, h: window.innerHeight };
+  });
 
   useEffect(() => {
-    setMounted(true);
     const updateSize = () => setWinSize({ w: window.innerWidth, h: window.innerHeight });
-    updateSize();
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
   }, []);
@@ -125,9 +125,9 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
     contentScale = Math.min(scaleX, scaleY, 1); // Cap scale at 1
   } else {
     // If no resources, default to center of screen
-    centerX = mounted ? winSize.w / 2 : 960;
-    centerY = mounted ? winSize.h / 2 : 540;
-    contentScale = 662 / (mounted ? Math.max(winSize.w, 662) : 1920);
+    centerX = winSize.w / 2;
+    centerY = winSize.h / 2;
+    contentScale = 662 / Math.max(winSize.w, 662);
   }
 
   return (
@@ -215,7 +215,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
                 >
                   {resources.length === 0 ? (
                     <div className="w-full h-full flex items-center justify-center pointer-events-none">
-                      <span className="text-white/40 font-arimo text-lg">
+                      <span className="text-white/40 font-arimo text-lg select-none">
                         {readOnly ? "This page is empty." : "Use Ctrl+V or the + button to paste resources here."}
                       </span>
                     </div>

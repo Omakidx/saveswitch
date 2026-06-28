@@ -12,6 +12,7 @@ export interface Resource {
   y?: number;
   zIndex?: number;
   rotation?: number;
+  isOwner?: boolean;
   created_at: string;
 }
 
@@ -23,17 +24,16 @@ interface ResourceCardProps {
 
 export default function ResourceCard({ resource, onDelete, readOnly = false }: ResourceCardProps) {
   const [copied, setCopied] = useState(false);
-  const [showHighlight, setShowHighlight] = useState(false);
+  const [showHighlight, setShowHighlight] = useState(
+    () => Date.now() - new Date(resource.created_at).getTime() < 5000
+  );
 
   useEffect(() => {
-    // If the resource was created within the last 5 seconds, it's newly pasted.
-    const isNew = Date.now() - new Date(resource.created_at).getTime() < 5000;
-    if (isNew) {
-      setShowHighlight(true);
+    if (showHighlight) {
       const timer = setTimeout(() => setShowHighlight(false), 3000);
       return () => clearTimeout(timer);
     }
-  }, [resource.created_at]);
+  }, [showHighlight]);
 
   const handleCopy = async (text: string) => {
     try {
@@ -78,7 +78,7 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
         const pdfBlob = new Blob([blob], { type: 'application/pdf' });
         const blobUrl = URL.createObjectURL(pdfBlob);
         newWindow.location.href = blobUrl;
-      } catch (err) {
+      } catch {
         newWindow.close();
         window.open(url, '_blank');
       }

@@ -3,28 +3,50 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
 import CardStack from "@/components/dashboard/CardStack";
-import InfiniteCanvas from "@/components/dashboard/InfiniteCanvas";
+import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
 import ResourceNavigator from "@/components/dashboard/ResourceNavigator";
 import CategorySwitch, { Category } from "@/components/dashboard/CategorySwitch";
 import FloatingActionButton from "@/components/dashboard/FloatingActionButton";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+import { API_BASE } from "@/lib/api";
 
 interface PublicProfileClientProps {
   username: string;
+}
+
+interface PublicUser {
+  id: string;
+  email: string;
+  name: string;
+  picture: string;
+}
+
+interface PublicPage {
+  id: string;
+  name: string;
+  color: string;
+  createdAt?: string;
+  created_at?: string;
+}
+
+interface PublicProfileResponse {
+  success: boolean;
+  user: PublicUser;
+  pages: PublicPage[];
+  error?: string;
 }
 
 export default function PublicProfileClient({ username }: PublicProfileClientProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<PublicUser | null>(null);
   const [pages, setPages] = useState<PageData[]>([]);
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
+  const [resourcesPageId, setResourcesPageId] = useState<string | null>(null);
   const [isCanvasMode, setIsCanvasMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem(`saveswitch-public-canvas-${username}`) === 'true';
@@ -41,7 +63,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  const canvasRef = useRef<any>(null);
+  const canvasRef = useRef<InfiniteCanvasRef>(null);
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
 
   // 1. Fetch user & public pages
@@ -50,29 +72,29 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
       try {
         const res = await fetch(`${API_BASE}/public/users/${username}`);
         if (!res.ok) throw new Error("User not found");
-        const data = await res.json();
+        const data = await res.json() as PublicProfileResponse;
         if (!data.success) throw new Error(data.error || "User not found");
 
         setUser(data.user);
         
-        const formattedPages = data.pages.map((p: any) => ({
+        const formattedPages = data.pages.map((p) => ({
           id: p.id,
           name: p.name,
           color: p.color,
-          createdAt: p.createdAt || p.created_at
+          createdAt: p.createdAt || p.created_at || new Date().toISOString()
         }));
         
         setPages(formattedPages);
 
         if (formattedPages.length > 0) {
           const savedPageId = localStorage.getItem(`saveswitch-public-page-${username}`);
-          const pageToSet = formattedPages.some((p: any) => p.id === savedPageId)
+          const pageToSet = formattedPages.some((p) => p.id === savedPageId)
             ? savedPageId
             : formattedPages[formattedPages.length - 1].id;
           setActivePageId(pageToSet);
         }
-      } catch (err: any) {
-        setError(err.message);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : "User not found");
       } finally {
         setLoading(false);
       }
@@ -83,7 +105,6 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   // 2. Fetch resources when active page changes
   useEffect(() => {
     if (!activePageId) {
-      setResources([]);
       return;
     }
 
@@ -92,6 +113,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
         const res = await fetch(`${API_BASE}/public/pages/${activePageId}/resources`);
         if (res.ok) {
           const data = await res.json();
+          setResourcesPageId(activePageId);
           setResources(data.resources || []);
         }
       } catch (e) {
@@ -114,7 +136,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
         if (msg.type === 'resource_updated') {
           fetchResources();
         }
-      } catch (e) {}
+      } catch {}
     };
 
     return () => {
@@ -163,19 +185,15 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
-  // Auto-expand group of active page
-  useEffect(() => {
-    if (activePageId && dateGroups.length > 0) {
-      const group = dateGroups.find(g => g.pages.some(p => p.id === activePageId));
-      if (group) {
-        setExpandedDates(prev => {
-          const next = new Set(prev);
-          next.add(group.date);
-          return next;
-        });
-      }
-    }
+  const activeGroupDate = useMemo(() => {
+    return dateGroups.find(g => g.pages.some(p => p.id === activePageId))?.date ?? null;
   }, [activePageId, dateGroups]);
+
+  const visibleExpandedDates = useMemo(() => {
+    const next = new Set(expandedDates);
+    if (activeGroupDate) next.add(activeGroupDate);
+    return next;
+  }, [activeGroupDate, expandedDates]);
 
   const handleToggleExpand = useCallback((date: string) => {
     setExpandedDates(prev => {
@@ -242,6 +260,10 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   }
 
   const activePage = pages.find(p => p.id === activePageId);
+  const visibleResources = resourcesPageId === activePageId ? resources : [];
+  const filteredResources = activeCategory === 'target'
+    ? visibleResources
+    : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true);
 
   return (
     <div className="flex h-screen overflow-hidden w-full text-[#F8F8F8]">
@@ -249,7 +271,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
         user={user}
         dateGroups={dateGroups}
         selectedDate={selectedDate}
-        expandedDates={expandedDates}
+        expandedDates={visibleExpandedDates}
         onDateSelect={handleDateSelect}
         onToggleExpand={handleToggleExpand}
         onPageSelect={handlePageSelect}
@@ -273,7 +295,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
           </div>
 
           <ResourceNavigator
-            resources={resources}
+            resources={filteredResources}
             onSelectResource={handlePanToResource}
             isActive={isCanvasMode}
           />
@@ -286,7 +308,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
                 activePageId={activePageId}
                 isExpanded={isCanvasMode}
                 onPageSelect={handleCardSwipe}
-                resources={activeCategory === 'target' ? resources : resources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true)}
+                resources={filteredResources}
                 readOnly={true}
                 highlightedResourceId={highlightedResourceId}
               />

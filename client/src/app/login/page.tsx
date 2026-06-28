@@ -2,18 +2,24 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import GoogleOneTap from "@/components/GoogleOneTap";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
+import { API_BASE } from "@/lib/api";
 const GOOGLE_CLIENT_ID =
   process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ||
   "599000387525-8lf1uufr1o2t2smf41bbgtevu3kjp4is.apps.googleusercontent.com";
 
 export default function LoginPage() {
+  const router = useRouter();
+
   const handleGoogleSignIn = () => {
     // Redirect to backend OAuth initiation endpoint
     window.location.href = `${API_BASE}/auth/google`;
+  };
+
+  const handleXoomshare = () => {
+    router.push("/xoomshare");
   };
 
   useEffect(() => {
@@ -62,6 +68,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   id="xoomshare-btn"
+                  onClick={handleXoomshare}
                   className="flex items-center gap-2 px-3 w-[114px] h-[23px] bg-white rounded-lg border-none cursor-pointer transition-opacity duration-150 hover:opacity-88 active:opacity-75"
                 >
                   <Image

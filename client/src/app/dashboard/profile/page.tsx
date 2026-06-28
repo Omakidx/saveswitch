@@ -4,8 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Modal from "@/components/Modal";
 import LoadingSpinner from "@/components/LoadingSpinner";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
+import { API_BASE } from "@/lib/api";
 const MAX_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_PROFILE_IMAGE_TYPES = new Set([
   "image/png",
@@ -64,36 +63,32 @@ export default function ProfilePage() {
   }, [router]);
 
   useEffect(() => {
-    if (!username.trim()) {
-      setUsernameStatus("idle");
-      setUsernameMessage("");
-      return;
-    }
-
-    if (username === originalUsername) {
-      setUsernameStatus("idle");
-      setUsernameMessage("");
-      return;
-    }
-
-    if (username.trim().length < 3 || username.trim().length > 20) {
-      setUsernameStatus("invalid");
-      setUsernameMessage("Username must be between 3 and 20 characters.");
-      return;
-    }
-
-    if (!/^[a-z0-9_]+$/.test(username.trim().toLowerCase())) {
-      setUsernameStatus("invalid");
-      setUsernameMessage("Only lowercase letters, numbers, and underscores.");
-      return;
-    }
-
-    setUsernameStatus("checking");
-    setUsernameMessage("Checking availability...");
+    const trimmedUsername = username.trim();
+    const normalizedUsername = trimmedUsername.toLowerCase();
 
     const delayDebounceFn = setTimeout(async () => {
+      if (!trimmedUsername || username === originalUsername) {
+        setUsernameStatus("idle");
+        setUsernameMessage("");
+        return;
+      }
+
+      if (trimmedUsername.length < 3 || trimmedUsername.length > 20) {
+        setUsernameStatus("invalid");
+        setUsernameMessage("Username must be between 3 and 20 characters.");
+        return;
+      }
+
+      if (!/^[a-z0-9_]+$/.test(normalizedUsername)) {
+        setUsernameStatus("invalid");
+        setUsernameMessage("Only lowercase letters, numbers, and underscores.");
+        return;
+      }
+
+      setUsernameStatus("checking");
+      setUsernameMessage("Checking availability...");
       try {
-        const res = await fetch(`${API_BASE}/users/check-username?username=${encodeURIComponent(username.trim())}`, {
+        const res = await fetch(`${API_BASE}/users/check-username?username=${encodeURIComponent(trimmedUsername)}`, {
           credentials: "include",
         });
         const data = await res.json();
@@ -105,7 +100,7 @@ export default function ProfilePage() {
           setUsernameStatus("taken");
           setUsernameMessage(data.error || "Username is already taken.");
         }
-      } catch (err) {
+      } catch {
         setUsernameStatus("idle");
         setUsernameMessage("");
       }

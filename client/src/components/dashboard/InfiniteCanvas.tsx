@@ -4,6 +4,13 @@ import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } f
 
 export interface InfiniteCanvasRef {
   panTo: (x: number, y: number) => void;
+  getViewState: () => CanvasViewState;
+  setViewState: (state: CanvasViewState) => void;
+}
+
+export interface CanvasViewState {
+  offset: { x: number; y: number };
+  zoom: number;
 }
 
 interface InfiniteCanvasProps {
@@ -24,7 +31,7 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   const [isDragging, setIsDragging] = useState(false);
   const [isAnimatingToTarget, setIsAnimatingToTarget] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
-  const animationTimeout = useRef<any>(null);
+  const animationTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reset offset when toggling canvas mode off
   useEffect(() => {
@@ -53,7 +60,13 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
       animationTimeout.current = setTimeout(() => {
         setIsAnimatingToTarget(false);
       }, 800); // 800ms matches the transition duration
-    }
+    },
+    getViewState: () => ({ offset, zoom }),
+    setViewState: (state: CanvasViewState) => {
+      setOffset(state.offset);
+      setZoom(state.zoom);
+      if (canvasOffsetRef) canvasOffsetRef.current = state.offset;
+    },
   }));
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -162,5 +175,7 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
     </div>
   );
 });
+
+InfiniteCanvas.displayName = "InfiniteCanvas";
 
 export default InfiniteCanvas;

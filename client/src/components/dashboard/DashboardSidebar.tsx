@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import Image from "next/image";
 
 import { PageData } from "./ResourceMiniPanel";
@@ -34,6 +35,12 @@ interface DashboardSidebarProps {
   onToggleCollapse: () => void;
   onDeletePage: (pageId: string) => void;
   readOnly?: boolean;
+  disablePageActions?: boolean;
+  xoomshareExpiryNotice?: {
+    countdownLabel: string;
+    onDismiss?: () => void;
+    showAlways?: boolean;
+  };
 }
 
 export default function DashboardSidebar({
@@ -51,6 +58,8 @@ export default function DashboardSidebar({
   onToggleCollapse,
   onDeletePage,
   readOnly = false,
+  disablePageActions = false,
+  xoomshareExpiryNotice,
 }: DashboardSidebarProps) {
   const router = useRouter();
   const [isProfileExpanded, setIsProfileExpanded] = useState(false);
@@ -67,7 +76,7 @@ export default function DashboardSidebar({
           background: "#191818",
           borderRadius: 24,
           left: 24,
-          bottom: 24,
+          top: 24,
         }}
         aria-label="Expand sidebar"
       >
@@ -91,8 +100,8 @@ export default function DashboardSidebar({
     >
       {/* ── Header / Logo Area ── */}
       <div className="flex flex-col p-2" style={{ height: 64 }}>
-        <div className="flex items-center justify-between rounded-md p-2 h-full">
-          <div className="flex items-center gap-2 overflow-hidden">
+        <div className="flex items-center justify-between gap-2 rounded-md p-2 h-full">
+          <div className="flex items-center gap-2 overflow-hidden min-w-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/icons/saveswitch-logo.svg"
@@ -106,11 +115,11 @@ export default function DashboardSidebar({
               SaveSwitch
             </span>
           </div>
-          
+
           <button
             type="button"
             onClick={onToggleCollapse}
-            className="cursor-pointer border-none bg-transparent hover:opacity-80 transition-opacity duration-200 flex items-center justify-center shrink-0 ml-2"
+            className="cursor-pointer border-none bg-transparent hover:opacity-80 transition-opacity duration-200 flex items-center justify-center shrink-0"
             aria-label="Collapse sidebar"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -142,13 +151,46 @@ export default function DashboardSidebar({
             onPageUpdateName={onPageUpdateName}
             activePageId={activePageId}
             onDeletePage={onDeletePage}
-            readOnly={readOnly}
+            readOnly={readOnly || disablePageActions}
           />
         ))}
       </nav>
 
+      {xoomshareExpiryNotice && (
+        <div className="w-full p-3 pt-0">
+          <div className="flex flex-col gap-3.5 p-3.5 rounded-[12px] border border-white/[0.08] bg-[#1C1C1C] text-[#9B9B9B] shadow-[0_4px_24px_rgba(0,0,0,0.2)]">
+            <div className="flex items-start gap-2.5">
+              <Image
+                src="/icons/file-shred.svg"
+                alt=""
+                width={12}
+                height={12}
+                className="mt-[3px] shrink-0 opacity-90"
+              />
+              <p className="m-0 font-arimo text-[12px] leading-[16px] text-[#A4A4A4]">
+                Files are not saved and would be lost after the session.
+              </p>
+            </div>
+
+            <div className="mt-1 flex flex-col gap-2 font-arimo text-[11px] leading-[14px] text-[#8E8E8E]">
+              <XoomshareNoticeLine>Would be deleted in {xoomshareExpiryNotice.countdownLabel}</XoomshareNoticeLine>
+              <XoomshareNoticeLine>Cannot be recovered ever again</XoomshareNoticeLine>
+              <XoomshareNoticeLine>Deletion time is based on the creator preference</XoomshareNoticeLine>
+            </div>
+
+            <Link
+              href="/register"
+              onClick={xoomshareExpiryNotice.onDismiss}
+              className="block mt-1 w-full py-2 bg-[#282828] hover:bg-[#333333] rounded-md text-[#E0E0E0] font-arimo font-semibold text-[12px] text-center transition-colors no-underline shadow-sm border border-white/5 cursor-pointer"
+            >
+              Get Started
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* ── User Profile Footer / Sign Up CTA ── */}
-      {readOnly ? (
+      {readOnly && !xoomshareExpiryNotice ? (
         <div className="p-3 w-full" style={{ marginTop: "auto" }}>
           <div className="flex flex-col gap-3.5 p-3.5 rounded-[12px] bg-[#1C1C1C] border border-white/[0.08] shadow-[0_4px_24px_rgba(0,0,0,0.2)]">
             <div className="flex gap-2.5 items-start">
@@ -172,9 +214,9 @@ export default function DashboardSidebar({
               </div>
             </div>
 
-            <a href="/register" className="w-full py-2 mt-1 bg-[#282828] hover:bg-[#333333] rounded-md text-[#E0E0E0] font-arimo font-semibold text-[12px] text-center transition-colors no-underline shadow-sm border border-white/5">
+            <Link href="/register" className="w-full py-2 mt-1 bg-[#282828] hover:bg-[#333333] rounded-md text-[#E0E0E0] font-arimo font-semibold text-[12px] text-center transition-colors no-underline shadow-sm border border-white/5">
               Get Started
-            </a>
+            </Link>
           </div>
         </div>
       ) : user ? (
@@ -307,6 +349,21 @@ export default function DashboardSidebar({
         </div>
       ) : null}
     </aside>
+  );
+}
+
+function XoomshareNoticeLine({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex items-start gap-2.5">
+      <Image
+        src="/icons/cancel-right.svg"
+        alt=""
+        width={12}
+        height={12}
+        className="mt-[2px] shrink-0 opacity-90"
+      />
+      <span>{children}</span>
+    </div>
   );
 }
 

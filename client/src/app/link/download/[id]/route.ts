@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
+import { API_BASE } from '@/lib/api';
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
   
   try {
     const res = await fetch(`${API_BASE}/resources/${id}`);

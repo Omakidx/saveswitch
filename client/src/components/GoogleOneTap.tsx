@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useCallback } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
+import { API_BASE } from "@/lib/api";
 
 interface GoogleOneTapProps {
   clientId: string;
@@ -58,13 +57,18 @@ export default function GoogleOneTap({ clientId }: GoogleOneTapProps) {
           body: JSON.stringify({ credential: response.credential }),
         });
 
-        const data = await res.json();
+        const data = await res.json().catch(() => null);
 
-        if (data.success) {
+        if (!res.ok) {
+          console.error("One Tap sign-in failed:", data?.error || res.statusText);
+          return;
+        }
+
+        if (data?.success) {
           // Redirect to dashboard on successful sign-in
           window.location.href = "/dashboard";
         } else {
-          console.error("One Tap sign-in failed:", data.error);
+          console.error("One Tap sign-in failed:", data?.error || "Unknown error");
         }
       } catch (err) {
         console.error("One Tap sign-in error:", err);
@@ -86,24 +90,11 @@ export default function GoogleOneTap({ clientId }: GoogleOneTapProps) {
           callback: handleCredentialResponse,
           auto_select: false,
           cancel_on_tap_outside: true,
-          use_fedcm_for_prompt: false,
+          use_fedcm_for_prompt: true,
         });
 
         // Show the One Tap prompt
-        window.google.accounts.id.prompt((notification) => {
-          if (notification.isNotDisplayed()) {
-            console.log(
-              "One Tap not displayed:",
-              notification.getNotDisplayedReason()
-            );
-          }
-          if (notification.isSkippedMoment()) {
-            console.log(
-              "One Tap skipped:",
-              notification.getSkippedReason()
-            );
-          }
-        });
+        window.google.accounts.id.prompt();
       }
     };
     document.head.appendChild(script);

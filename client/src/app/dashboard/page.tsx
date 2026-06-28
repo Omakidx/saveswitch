@@ -7,11 +7,10 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import CardStack from "@/components/dashboard/CardStack";
 import ResourceMiniPanel, { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import FloatingActionButton from "@/components/dashboard/FloatingActionButton";
-import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
+import InfiniteCanvas, { CanvasViewState, InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
 import CategorySwitch, { Category } from "@/components/dashboard/CategorySwitch";
 import ResourceNavigator from "@/components/dashboard/ResourceNavigator";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
+import { API_BASE } from "@/lib/api";
 
 /* ── Types ── */
 interface User {
@@ -29,6 +28,13 @@ interface DateGroup {
   pages: PageData[];
 }
 
+interface ApiPage {
+  id: string;
+  color: string;
+  created_at: string;
+  name: string;
+}
+
 interface ToastMessage {
   id: string;
   message: string;
@@ -40,6 +46,116 @@ interface ConfirmModalState {
   title: string;
   message: string;
   onConfirm: () => void;
+}
+
+type Visibility = "private" | "public";
+
+interface WorkspaceSnapshot {
+  activePageId: string | null;
+  selectedDate: string | null;
+  expandedDates: string[];
+  isCanvasMode: boolean;
+  activeCategory: Category;
+  canvasView: CanvasViewState;
+}
+
+interface PersistedDashboardState {
+  visibility: Visibility;
+  workspaces: Record<Visibility, WorkspaceSnapshot>;
+}
+
+const DEFAULT_CANVAS_VIEW: CanvasViewState = {
+  offset: { x: 0, y: 0 },
+  zoom: 1,
+};
+
+const DASHBOARD_STATE_STORAGE_KEY = "saveswitch-dashboard-state";
+
+function createWorkspaceSnapshot(): WorkspaceSnapshot {
+  return {
+    activePageId: null,
+    selectedDate: null,
+    expandedDates: [],
+    isCanvasMode: false,
+    activeCategory: "target",
+    canvasView: DEFAULT_CANVAS_VIEW,
+  };
+}
+
+function createDashboardState(): PersistedDashboardState {
+  return {
+    visibility: "public",
+    workspaces: {
+      private: createWorkspaceSnapshot(),
+      public: createWorkspaceSnapshot(),
+    },
+  };
+}
+
+function isVisibility(value: unknown): value is Visibility {
+  return value === "private" || value === "public";
+}
+
+function isCanvasViewState(value: unknown): value is CanvasViewState {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<CanvasViewState>;
+  return (
+    typeof candidate.zoom === "number" &&
+    !!candidate.offset &&
+    typeof candidate.offset.x === "number" &&
+    typeof candidate.offset.y === "number"
+  );
+}
+
+function normalizeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot {
+  const fallback = createWorkspaceSnapshot();
+  if (!value || typeof value !== "object") return fallback;
+
+  const candidate = value as Partial<WorkspaceSnapshot>;
+  const activeCategory = candidate.activeCategory;
+
+  return {
+    activePageId: typeof candidate.activePageId === "string" ? candidate.activePageId : null,
+    selectedDate: typeof candidate.selectedDate === "string" ? candidate.selectedDate : null,
+    expandedDates: Array.isArray(candidate.expandedDates)
+      ? candidate.expandedDates.filter((date): date is string => typeof date === "string")
+      : [],
+    isCanvasMode: typeof candidate.isCanvasMode === "boolean" ? candidate.isCanvasMode : false,
+    activeCategory:
+      activeCategory === "target" ||
+      activeCategory === "video" ||
+      activeCategory === "image" ||
+      activeCategory === "link" ||
+      activeCategory === "document"
+        ? activeCategory
+        : "target",
+    canvasView: isCanvasViewState(candidate.canvasView) ? candidate.canvasView : DEFAULT_CANVAS_VIEW,
+  };
+}
+
+function readDashboardState(): PersistedDashboardState {
+  if (typeof window === "undefined") return createDashboardState();
+
+  try {
+    const rawState = localStorage.getItem(DASHBOARD_STATE_STORAGE_KEY);
+    if (!rawState) return createDashboardState();
+
+    const parsed = JSON.parse(rawState) as Partial<PersistedDashboardState>;
+    return {
+      visibility: isVisibility(parsed.visibility) ? parsed.visibility : "public",
+      workspaces: {
+        private: normalizeWorkspaceSnapshot(parsed.workspaces?.private),
+        public: normalizeWorkspaceSnapshot(parsed.workspaces?.public),
+      },
+    };
+  } catch {
+    return createDashboardState();
+  }
+}
+
+function writeDashboardState(state: PersistedDashboardState) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(DASHBOARD_STATE_STORAGE_KEY, JSON.stringify(state));
 }
 
 /* ── Helpers ── */
@@ -123,6 +239,9 @@ function getApiErrorMessage(error: unknown, fallback: string): string {
 
 /* ── Dashboard Page ── */
 export default function DashboardPage() {
+  const [initialDashboardState] = useState(readDashboardState);
+  const initialWorkspaceSnapshot = initialDashboardState.workspaces[initialDashboardState.visibility];
+
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   
@@ -141,23 +260,31 @@ export default function DashboardPage() {
   // Modal
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
 
-  const [visibility, setVisibility] = useState<"private" | "public">("public");
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+  const [visibility, setVisibility] = useState<Visibility>(initialDashboardState.visibility);
+  const [selectedDate, setSelectedDate] = useState<string | null>(initialWorkspaceSnapshot.selectedDate);
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set(initialWorkspaceSnapshot.expandedDates));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [isCanvasMode, setIsCanvasMode] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<Category>("target");
+  const [isCanvasMode, setIsCanvasMode] = useState(initialWorkspaceSnapshot.isCanvasMode);
+  const [activeCategory, setActiveCategory] = useState<Category>(initialWorkspaceSnapshot.activeCategory);
 
   // Pages state
   const [pages, setPages] = useState<PageData[]>([]);
-  const [activePageId, setActivePageId] = useState<string | null>(null);
+  const [activePageId, setActivePageId] = useState<string | null>(initialWorkspaceSnapshot.activePageId);
 
   // Resources state
   const [resources, setResources] = useState<Resource[]>([]);
-  const [isPasting, setIsPasting] = useState(false);
+  const [, setIsPasting] = useState(false);
+  const [resourcesPageId, setResourcesPageId] = useState<string | null>(null);
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
   const canvasRef = useRef<InfiniteCanvasRef>(null);
   const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
+  const visibilityRef = useRef<Visibility>(initialDashboardState.visibility);
+  const pagesRequestIdRef = useRef(0);
+  const pagesCacheRef = useRef<Record<Visibility, PageData[] | null>>({
+    private: null,
+    public: null,
+  });
+  const workspaceSnapshotRef = useRef<Record<Visibility, WorkspaceSnapshot>>(initialDashboardState.workspaces);
 
   const handlePanToResource = useCallback((id: string, x: number, y: number) => {
     if (canvasRef.current) {
@@ -169,29 +296,145 @@ export default function DashboardPage() {
     }, 3000);
   }, []);
 
+  useEffect(() => {
+    visibilityRef.current = visibility;
+  }, [visibility]);
+
+  const getCanvasViewState = useCallback((): CanvasViewState => {
+    return canvasRef.current?.getViewState() ?? {
+      offset: { ...canvasOffsetRef.current },
+      zoom: 1,
+    };
+  }, []);
+
+  const persistDashboardState = useCallback((nextVisibility: Visibility = visibilityRef.current) => {
+    writeDashboardState({
+      visibility: nextVisibility,
+      workspaces: workspaceSnapshotRef.current,
+    });
+  }, []);
+
+  const saveWorkspaceSnapshot = useCallback((mode: Visibility = visibility) => {
+    workspaceSnapshotRef.current[mode] = {
+      activePageId,
+      selectedDate,
+      expandedDates: Array.from(expandedDates),
+      isCanvasMode,
+      activeCategory,
+      canvasView: getCanvasViewState(),
+    };
+    persistDashboardState();
+  }, [activeCategory, activePageId, expandedDates, getCanvasViewState, isCanvasMode, persistDashboardState, selectedDate, visibility]);
+
+  const restoreWorkspaceSnapshot = useCallback((mode: Visibility, nextPages: PageData[], preserveCurrentCanvas = false) => {
+    const snapshot = workspaceSnapshotRef.current[mode];
+    const storedPageId = snapshot.activePageId ?? localStorage.getItem(`saveswitch-active-page-${mode}`);
+    const activeId = storedPageId && nextPages.some((page) => page.id === storedPageId)
+      ? storedPageId
+      : nextPages.length > 0
+        ? nextPages[nextPages.length - 1].id
+        : null;
+    const groups = groupPagesByDate(nextPages);
+    const validDates = new Set(groups.map((group) => group.date));
+    const activePage = nextPages.find((page) => page.id === activeId);
+    const fallbackDate = activePage?.createdAt.split("T")[0] ?? groups[0]?.date ?? null;
+    const selected = snapshot.selectedDate && validDates.has(snapshot.selectedDate)
+      ? snapshot.selectedDate
+      : fallbackDate;
+    const restoredExpandedDates = snapshot.expandedDates.filter((date) => validDates.has(date));
+    const expanded = restoredExpandedDates.length > 0
+      ? restoredExpandedDates
+      : fallbackDate
+        ? [fallbackDate]
+        : [];
+
+    setPages(nextPages);
+    setActivePageId(activeId);
+    setSelectedDate(selected);
+    setExpandedDates(new Set(expanded));
+    setIsCanvasMode(snapshot.isCanvasMode);
+    setActiveCategory(snapshot.activeCategory);
+
+    if (activeId) {
+      localStorage.setItem(`saveswitch-active-page-${mode}`, activeId);
+    } else {
+      localStorage.removeItem(`saveswitch-active-page-${mode}`);
+    }
+
+    const canvasView = snapshot.isCanvasMode
+      ? preserveCurrentCanvas
+        ? getCanvasViewState()
+        : snapshot.canvasView
+      : DEFAULT_CANVAS_VIEW;
+    requestAnimationFrame(() => {
+      canvasRef.current?.setViewState(canvasView);
+    });
+
+    workspaceSnapshotRef.current[mode] = {
+      ...snapshot,
+      activePageId: activeId,
+      selectedDate: selected,
+      expandedDates: expanded,
+      canvasView,
+    };
+    persistDashboardState(mode);
+  }, [getCanvasViewState, persistDashboardState]);
+
+  const restorePendingWorkspaceSnapshot = useCallback((mode: Visibility) => {
+    const snapshot = workspaceSnapshotRef.current[mode];
+    setPages([]);
+    setActivePageId(snapshot.activePageId);
+    setSelectedDate(snapshot.selectedDate);
+    setExpandedDates(new Set(snapshot.expandedDates));
+    setIsCanvasMode(snapshot.isCanvasMode);
+    setActiveCategory(snapshot.activeCategory);
+    requestAnimationFrame(() => {
+      canvasRef.current?.setViewState(snapshot.isCanvasMode ? snapshot.canvasView : DEFAULT_CANVAS_VIEW);
+    });
+  }, []);
+
+  useEffect(() => {
+    const mode = visibilityRef.current;
+    workspaceSnapshotRef.current[mode] = {
+      activePageId,
+      selectedDate,
+      expandedDates: Array.from(expandedDates),
+      isCanvasMode,
+      activeCategory,
+      canvasView: getCanvasViewState(),
+    };
+    persistDashboardState(mode);
+  }, [activeCategory, activePageId, expandedDates, getCanvasViewState, isCanvasMode, persistDashboardState, selectedDate]);
+
   // Fetch resources when active page changes
   useEffect(() => {
     if (!activePageId) {
-      setResources([]);
       return;
     }
     
-    // Clear old resources instantly so they don't linger on the new page while fetching
-    setResources([]);
+    const controller = new AbortController();
 
     const fetchResources = async () => {
       try {
-        const res = await fetch(`${API_BASE}/pages/${activePageId}/resources`, { credentials: "include" });
+        const pageId = activePageId;
+        const res = await fetch(`${API_BASE}/pages/${pageId}/resources`, {
+          credentials: "include",
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || activePageId !== pageId) return;
         if (res.ok) {
           const data = await res.json();
+          setResourcesPageId(pageId);
           setResources(data.resources || []);
         }
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error("Failed to fetch resources", err);
       }
     };
     fetchResources();
-  }, [activePageId]);
+    return () => controller.abort();
+  }, [activePageId, visibility]);
 
   /* ── Fetch user on mount ── */
   useEffect(() => {
@@ -203,9 +446,6 @@ export default function DashboardPage() {
         const meData = await meRes.json();
         if (meData.authenticated) {
           setUser(meData.user);
-          if (meData.user.visibility) {
-            setVisibility(meData.user.visibility as "private" | "public");
-          }
         }
       } catch (err) {
         console.error("Error fetching user", err);
@@ -218,58 +458,54 @@ export default function DashboardPage() {
 
   /* ── Fetch pages when visibility changes ── */
   useEffect(() => {
+    const mode = visibility;
+    const requestId = ++pagesRequestIdRef.current;
+    const controller = new AbortController();
+
+    const cachedPages = pagesCacheRef.current[mode];
+    if (cachedPages) {
+      restoreWorkspaceSnapshot(mode, cachedPages);
+    } else {
+      restorePendingWorkspaceSnapshot(mode);
+    }
+
     async function fetchPages() {
-      // Clear current state when switching workspace
-      setPages([]);
-      setActivePageId(null);
-      setResources([]);
-      
       try {
-        const resRes = await fetch(`${API_BASE}/pages?visibility=${visibility}`, {
+        const resRes = await fetch(`${API_BASE}/pages?visibility=${mode}`, {
           credentials: "include",
+          signal: controller.signal,
         });
+        if (controller.signal.aborted || requestId !== pagesRequestIdRef.current || visibilityRef.current !== mode) {
+          return;
+        }
+
         if (resRes.ok) {
           const resData = await resRes.json();
-          const fetchedPages = resData.pages || [];
+          if (controller.signal.aborted || requestId !== pagesRequestIdRef.current || visibilityRef.current !== mode) {
+            return;
+          }
+
+          const fetchedPages = (resData.pages || []) as ApiPage[];
           
-          const formattedPages = fetchedPages.map((p: any) => ({
+          const formattedPages = fetchedPages.map((p) => ({
             id: p.id,
             color: p.color,
             createdAt: p.created_at,
             name: p.name,
           }));
           
-          setPages(formattedPages);
-          
-          if (formattedPages.length > 0) {
-            const savedPageId = localStorage.getItem(`saveswitch-active-page-${visibility}`);
-            const pageToSet = formattedPages.some((p: any) => p.id === savedPageId) 
-              ? savedPageId 
-              : formattedPages[formattedPages.length - 1].id;
-              
-            setActivePageId(pageToSet);
-            localStorage.setItem(`saveswitch-active-page-${visibility}`, pageToSet);
-            const groups = groupPagesByDate(formattedPages);
-            if (groups.length > 0) {
-              const activePage = formattedPages.find((p: any) => p.id === pageToSet);
-              const targetDate = activePage ? activePage.createdAt.split("T")[0] : groups[0].date;
-              setSelectedDate(targetDate);
-              
-              const activeGroup = groups.find(g => g.date === targetDate);
-              if (activeGroup) {
-                setExpandedDates(new Set([activeGroup.date]));
-              } else {
-                setExpandedDates(new Set());
-              }
-            }
-          }
+          pagesCacheRef.current[mode] = formattedPages;
+          restoreWorkspaceSnapshot(mode, formattedPages, true);
         }
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error("Failed to fetch pages", err);
       }
     }
+
     fetchPages();
-  }, [visibility]);
+    return () => controller.abort();
+  }, [restorePendingWorkspaceSnapshot, restoreWorkspaceSnapshot, visibility]);
 
   /* ── Grouped resources ── */
   const dateGroups = groupPagesByDate(pages);
@@ -292,20 +528,20 @@ export default function DashboardPage() {
   }, []);
 
   const handleVisibilityToggle = useCallback(
-    async (mode: "private" | "public") => {
+    (mode: Visibility) => {
+      if (mode === visibility) return;
+
+      saveWorkspaceSnapshot(visibility);
       setVisibility(mode);
-      try {
-        await fetch(`${API_BASE}/users/me/visibility`, {
-          method: "PATCH",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ visibility: mode }),
-        });
-      } catch (err) {
-        console.error("Visibility toggle error:", err);
+      const cachedPages = pagesCacheRef.current[mode];
+      if (cachedPages) {
+        restoreWorkspaceSnapshot(mode, cachedPages);
+      } else {
+        restorePendingWorkspaceSnapshot(mode);
       }
+      persistDashboardState(mode);
     },
-    []
+    [persistDashboardState, restorePendingWorkspaceSnapshot, restoreWorkspaceSnapshot, saveWorkspaceSnapshot, visibility]
   );
 
   const handleLogout = useCallback(async () => {
@@ -344,8 +580,13 @@ export default function DashboardPage() {
             createdAt: data.page.created_at,
             name: data.page.name,
           };
-          setPages((prev) => [...prev, newPage]);
+          setPages((prev) => {
+            const next = [...prev, newPage];
+            pagesCacheRef.current[visibility] = next;
+            return next;
+          });
           setActivePageId(newPage.id);
+          setSelectedDate(todayPrefix);
           localStorage.setItem(`saveswitch-active-page-${visibility}`, newPage.id);
           setIsCanvasMode(true);
           setExpandedDates((prev) => new Set(prev).add(todayPrefix));
@@ -373,6 +614,7 @@ export default function DashboardPage() {
   const executeDeletePage = useCallback(async (id: string) => {
     setPages((prev) => {
       const filtered = prev.filter(p => p.id !== id);
+      pagesCacheRef.current[visibility] = filtered;
       // Update active page id if we deleted the currently active page
       if (id === activePageId) {
         if (filtered.length > 0) {
@@ -476,7 +718,11 @@ export default function DashboardPage() {
       return;
     }
 
-    setPages((prev) => prev.map((p) => (p.id === id ? { ...p, name: newName.trim() } : p)));
+    setPages((prev) => {
+      const next = prev.map((p) => (p.id === id ? { ...p, name: newName.trim() } : p));
+      pagesCacheRef.current[visibility] = next;
+      return next;
+    });
 
     try {
       const res = await fetch(`${API_BASE}/pages/${id}`, {
@@ -493,72 +739,13 @@ export default function DashboardPage() {
       console.error("Failed to update page name", err);
       showToast("A network error occurred while updating the page name.", 'error');
     }
-  }, [pages, showToast]);
+  }, [pages, showToast, visibility]);
 
   const handleFabClick = useCallback(() => {
     setIsCanvasMode((prev) => !prev);
   }, []);
 
-  const handlePaste = useCallback(async () => {
-    if (!isCanvasMode) {
-      showToast("Please enter a canvas to paste resources.", "info");
-      return;
-    }
-    if (!activePageId) {
-      showToast("Please select a page first to paste resources.", "info");
-      return;
-    }
-    
-    try {
-      const items = await navigator.clipboard.read();
-      let hasItem = false;
-      
-      for (const item of items) {
-        if (item.types.some(t => t.startsWith('image/'))) {
-          hasItem = true;
-          const imageType = item.types.find(t => t.startsWith('image/'));
-          if (imageType) {
-            const blob = await item.getType(imageType);
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste("image", reader.result as string);
-            reader.readAsDataURL(blob);
-          }
-        } else if (item.types.includes('application/pdf')) {
-           hasItem = true;
-           const blob = await item.getType('application/pdf');
-           const reader = new FileReader();
-           reader.onloadend = () => processPaste("pdf", reader.result as string);
-           reader.readAsDataURL(blob);
-        } else if (item.types.includes('text/plain')) {
-          hasItem = true;
-          const blob = await item.getType('text/plain');
-          const text = await blob.text();
-          const isUrl = /^https?:\/\//i.test(text.trim());
-          processPaste(isUrl ? "link" : "text", text.trim());
-        }
-      }
-      
-      if (!hasItem) {
-        showToast("Clipboard is empty or contains unsupported content.", "info");
-      }
-    } catch (err) {
-      console.error("Paste read failed", err);
-      // Fallback for browsers without advanced clipboard API
-      try {
-        const text = await navigator.clipboard.readText();
-        if (text) {
-          const isUrl = /^https?:\/\//i.test(text.trim());
-          processPaste(isUrl ? "link" : "text", text.trim());
-        } else {
-           showToast("Clipboard is empty.", "info");
-        }
-      } catch (fallbackErr) {
-        showToast("Failed to read from clipboard. Allow clipboard permissions.", "error");
-      }
-    }
-  }, [activePageId, showToast, isCanvasMode]);
-
-  const processPaste = async (type: 'link'|'image'|'text'|'pdf'|'file', content: string, title?: string) => {
+  const processPaste = useCallback(async (type: Resource['type'], content: string, title?: string) => {
     if (!activePageId) return;
     setIsPasting(true);
     showToast(`Pasting ${type}...`, 'info');
@@ -616,6 +803,7 @@ export default function DashboardPage() {
       const data = await res.json();
       if (data.success) {
         setResources(prev => [...prev, data.resource]);
+        setResourcesPageId(activePageId);
         showToast(`Resource saved successfully!`, 'success');
       } else {
         showToast(getApiErrorMessage(data.error, "Unable to save this resource. Please try again."), 'error');
@@ -626,9 +814,68 @@ export default function DashboardPage() {
     } finally {
       setIsPasting(false);
     }
-  };
+  }, [activePageId, resources, showToast]);
 
-  const handleFileUploads = (files: File[]) => {
+  const handlePaste = useCallback(async () => {
+    if (!isCanvasMode) {
+      showToast("Please enter a canvas to paste resources.", "info");
+      return;
+    }
+    if (!activePageId) {
+      showToast("Please select a page first to paste resources.", "info");
+      return;
+    }
+    
+    try {
+      const items = await navigator.clipboard.read();
+      let hasItem = false;
+      
+      for (const item of items) {
+        if (item.types.some(t => t.startsWith('image/'))) {
+          hasItem = true;
+          const imageType = item.types.find(t => t.startsWith('image/'));
+          if (imageType) {
+            const blob = await item.getType(imageType);
+            const reader = new FileReader();
+            reader.onloadend = () => processPaste("image", reader.result as string);
+            reader.readAsDataURL(blob);
+          }
+        } else if (item.types.includes('application/pdf')) {
+           hasItem = true;
+           const blob = await item.getType('application/pdf');
+           const reader = new FileReader();
+           reader.onloadend = () => processPaste("pdf", reader.result as string);
+           reader.readAsDataURL(blob);
+        } else if (item.types.includes('text/plain')) {
+          hasItem = true;
+          const blob = await item.getType('text/plain');
+          const text = await blob.text();
+          const isUrl = /^https?:\/\//i.test(text.trim());
+          processPaste(isUrl ? "link" : "text", text.trim());
+        }
+      }
+      
+      if (!hasItem) {
+        showToast("Clipboard is empty or contains unsupported content.", "info");
+      }
+    } catch (err) {
+      console.error("Paste read failed", err);
+      // Fallback for browsers without advanced clipboard API
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          const isUrl = /^https?:\/\//i.test(text.trim());
+          processPaste(isUrl ? "link" : "text", text.trim());
+        } else {
+           showToast("Clipboard is empty.", "info");
+        }
+      } catch {
+        showToast("Failed to read from clipboard. Allow clipboard permissions.", "error");
+      }
+    }
+  }, [activePageId, processPaste, showToast, isCanvasMode]);
+
+  const handleFileUploads = useCallback((files: File[]) => {
     if (!isCanvasMode) {
       showToast("Please enter a canvas to upload resources.", "info");
       return;
@@ -649,7 +896,7 @@ export default function DashboardPage() {
       }
       reader.readAsDataURL(file);
     }
-  };
+  }, [activePageId, isCanvasMode, processPaste, showToast]);
 
   useEffect(() => {
     const handleGlobalPaste = (e: ClipboardEvent) => {
@@ -702,9 +949,10 @@ export default function DashboardPage() {
       }
     };
 
-    const handleUploadEvent = (e: any) => {
-      if (e.detail && e.detail.files) {
-        handleFileUploads(e.detail.files);
+    const handleUploadEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ files?: File[] }>;
+      if (customEvent.detail?.files) {
+        handleFileUploads(customEvent.detail.files);
       }
     };
     
@@ -714,10 +962,14 @@ export default function DashboardPage() {
        window.removeEventListener('paste', handleGlobalPaste);
        window.removeEventListener('saveswitch-upload', handleUploadEvent);
     };
-  }, [activePageId, resources, isCanvasMode]);
+  }, [activePageId, handleFileUploads, isCanvasMode, processPaste]);
 
   /* ── Active Page state ── */
   const activePage = pages.find(p => p.id === activePageId);
+  const visibleResources = resourcesPageId === activePageId ? resources : [];
+  const filteredResources = activeCategory === 'target'
+    ? visibleResources
+    : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true);
 
   /* ── Loading state ── */
   if (loading) {
@@ -773,7 +1025,7 @@ export default function DashboardPage() {
 
           {/* ── Resource Navigator (top left) ── */}
           <ResourceNavigator 
-            resources={resources} 
+            resources={filteredResources} 
             onSelectResource={handlePanToResource} 
             isActive={isCanvasMode} 
           />
@@ -787,7 +1039,7 @@ export default function DashboardPage() {
                 activePageId={activePageId}
                 isExpanded={isCanvasMode} 
                 onPageSelect={handleCardSwipe}
-                resources={activeCategory === 'target' ? resources : resources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true)}
+                resources={filteredResources}
                 onDeleteResource={handleDeleteResource}
                 onUpdateResourcePosition={handleUpdateResourcePosition}
                 highlightedResourceId={highlightedResourceId}

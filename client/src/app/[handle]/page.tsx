@@ -1,15 +1,12 @@
-"use server";
-
-import React from 'react';
-import { notFound } from 'next/navigation';
 import PublicProfileClient from './PublicProfileClient';
+import XoomshareRoomClient from '@/components/xoomshare/XoomshareRoomClient';
 
 export default async function PublicProfilePage({ params }: { params: Promise<{ handle: string }> }) {
   const resolvedParams = await params;
   const decodedHandle = decodeURIComponent(resolvedParams.handle);
   
   if (!decodedHandle.startsWith('@')) {
-    notFound();
+    return <XoomshareRoomClient pathCode={decodedHandle} />;
   }
 
   const username = decodedHandle.slice(1);

@@ -72,3 +72,31 @@ fail inserts. API errors for resource saves now return safe public messages and
 HTTP statuses instead of raw Drizzle/SQL details. Verified an authenticated
 paste with `y: 299.5` saved as `300`, then deleted the temporary resource.
 ────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: frontend-dev] [DATE: 2026-06-27] [TYPE: COMPLETED]
+
+Dashboard private/public switching now snapshots page/date/category/canvas view
+state per workspace and guards page/resource fetches against stale responses.
+Touched `client/src/app/dashboard/page.tsx` and `InfiniteCanvas.tsx`.
+`bunx tsc --noEmit` passes; project lint still has existing dashboard/profile
+and public-profile rule failures outside this fix.
+────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: frontend-dev] [DATE: 2026-06-27] [TYPE: COMPLETED]
+
+Dashboard workspace state is now persisted in browser-local dashboard storage
+and no longer reads from or writes to `users.visibility`. Profile navigation and
+hard refresh restore the last private/public workspace snapshot, including page,
+date expansion, category, canvas mode, and canvas pan/zoom.
+────────────────────────────────────────
+
+────────────────────────────────────────
+[ROLE: frontend-dev] [DATE: 2026-06-27] [TYPE: COMPLETED]
+
+Moved the dashboard sidebar toggle to the top-left placement so the collapsed
+expander no longer conflicts with the bottom-left resource navigator.
+Touched `client/src/components/dashboard/DashboardSidebar.tsx`.
+`bunx tsc --noEmit` passes.
+────────────────────────────────────────

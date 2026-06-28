@@ -1,4 +1,5 @@
-import { pgTable, text, timestamp, uuid, integer } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+import { boolean, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: text('id').primaryKey(), // using Google sub ID which is a string
@@ -11,12 +12,20 @@ export const users = pgTable('users', {
 
 export const pages = pgTable('pages', {
   id: uuid('id').primaryKey().defaultRandom(),
-  userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
   color: text('color').notNull(),
   name: text('name').notNull(),
   visibility: text('visibility', { enum: ['public', 'private'] }).default('private').notNull(),
+  pathCode: text('path_code'),
+  sessionId: text('session_id'),
+  expiresAt: timestamp('expires_at'),
+  allowGuestResources: boolean('allow_guest_resources').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex('pages_path_code_unique')
+    .on(table.pathCode)
+    .where(sql`${table.pathCode} is not null`),
+]);
 
 export const resources = pgTable('resources', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -30,5 +39,6 @@ export const resources = pgTable('resources', {
   y: integer('y').default(0).notNull(), // Y coordinate for freeform canvas
   zIndex: integer('z_index').default(1).notNull(), // Z-index for stacking
   rotation: integer('rotation').default(0).notNull(), // Rotation angle
+  sessionId: text('session_id'), // Track which session/device created this resource
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

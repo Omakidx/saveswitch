@@ -13,6 +13,7 @@ interface PageNavigationProps {
   onPageSelect: (id: string) => void;
   onAddPage: () => void;
   onDeletePage?: (id: string) => void;
+  readOnly?: boolean;
 }
 
 export default function ResourceMiniPanel({
@@ -21,12 +22,14 @@ export default function ResourceMiniPanel({
   onPageSelect,
   onAddPage,
   onDeletePage,
+  readOnly = false,
 }: PageNavigationProps) {
   if (pages.length === 0) {
     return (
       <button
         type="button"
         onClick={onAddPage}
+        disabled={readOnly}
         className="flex items-center justify-center cursor-pointer transition-all duration-200 hover:scale-105 shadow-lg"
         style={{
           width: 55,
@@ -65,6 +68,7 @@ export default function ResourceMiniPanel({
           <button
             type="button"
             onClick={onAddPage}
+            disabled={readOnly}
             className="flex items-center justify-center cursor-pointer bg-transparent transition-all duration-200 hover:bg-white/5"
             style={{
               width: 55,
@@ -129,7 +133,7 @@ export default function ResourceMiniPanel({
                     }}
                     title={page.name}
                   />
-                  {onDeletePage && (
+                  {onDeletePage && !readOnly && (
                     <button
                       type="button"
                       onClick={(e) => {

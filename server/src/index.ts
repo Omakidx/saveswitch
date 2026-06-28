@@ -3,7 +3,7 @@ import { cors } from '@elysiajs/cors'
 import { jwt } from '@elysiajs/jwt'
 import { db } from './db'
 import { users, pages, resources } from './db/schema'
-import { eq, and } from 'drizzle-orm'
+import { eq, and, inArray, isNotNull, lt } from 'drizzle-orm'
 import {
   CloudinaryConfigurationError,
   ImageUploadError,
@@ -108,8 +108,111 @@ const getOptionalString = (value: unknown) => {
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ''
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || ''
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:5000/auth/google/callback'
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/google/callback'
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+const XOOMSHARE_TTL_HOURS = 3
+const XOOMSHARE_TTL_MS = XOOMSHARE_TTL_HOURS * 60 * 60 * 1000
+const XOOMSHARE_CLEANUP_INTERVAL_MS = 60 * 1000
+const RESERVED_PATH_CODES = new Set([
+  'api',
+  'auth',
+  'dashboard',
+  'link',
+  'login',
+  'public',
+  'register',
+  'xoomshare',
+])
+
+type XoomshareCreateBody = {
+  pathCode?: unknown
+}
+
+const generatePathCode = () => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+  let code = ''
+  for (let i = 0; i < 8; i++) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)]
+  }
+  return code
+}
+
+const normalizePathCode = (value: unknown) => {
+  if (value === undefined || value === null || value === '') return generatePathCode()
+  if (typeof value !== 'string') {
+    throw new ResourceValidationError('Secret page code must be text')
+  }
+
+  const pathCode = value.trim()
+  if (pathCode.length < 3 || pathCode.length > 48) {
+    throw new ResourceValidationError('Secret page code must be between 3 and 48 characters')
+  }
+
+  if (!/^[A-Za-z0-9_-]+$/.test(pathCode)) {
+    throw new ResourceValidationError('Use letters, numbers, hyphens, or underscores only')
+  }
+
+  if (RESERVED_PATH_CODES.has(pathCode.toLowerCase()) || pathCode.startsWith('@')) {
+    throw new ResourceValidationError('That secret page code is reserved')
+  }
+
+  return pathCode
+}
+
+const getEffectiveXoomshareExpiresAt = (page: typeof pages.$inferSelect) => {
+  if (!page.sessionId && !page.expiresAt) return null
+
+  const ttlExpiry = new Date(page.createdAt.getTime() + XOOMSHARE_TTL_MS)
+  if (!page.expiresAt) return ttlExpiry
+
+  return page.expiresAt.getTime() <= ttlExpiry.getTime() ? page.expiresAt : ttlExpiry
+}
+
+const formatPage = (page: typeof pages.$inferSelect) => {
+  const { sessionId: _sessionId, ...safePage } = page
+  const effectiveExpiresAt = getEffectiveXoomshareExpiresAt(page)
+  return {
+    ...safePage,
+    created_at: page.createdAt.toISOString(),
+    expires_at: effectiveExpiresAt ? effectiveExpiresAt.toISOString() : null,
+  }
+}
+
+const formatResource = (resource: typeof resources.$inferSelect) => ({
+  ...resource,
+  created_at: resource.createdAt.toISOString(),
+})
+
+const isExpired = (expiresAt: Date | null) => {
+  return !!expiresAt && expiresAt.getTime() <= Date.now()
+}
+
+const isPageExpired = (page: typeof pages.$inferSelect) => {
+  return isExpired(getEffectiveXoomshareExpiresAt(page))
+}
+
+const cleanupExpiredXoomshareRooms = async () => {
+  try {
+    const deletedPages = await db.delete(pages)
+      .where(and(isNotNull(pages.expiresAt), lt(pages.expiresAt, new Date())))
+      .returning({ id: pages.id })
+    const expiredByTtlPages = await db.delete(pages)
+      .where(and(isNotNull(pages.sessionId), lt(pages.createdAt, new Date(Date.now() - XOOMSHARE_TTL_MS))))
+      .returning({ id: pages.id })
+
+    const deletedCount = deletedPages.length + expiredByTtlPages.length
+    if (deletedCount > 0) {
+      console.log(`Deleted ${deletedCount} expired Xoomshare page(s)`)
+    }
+  } catch (error) {
+    console.error('Expired Xoomshare cleanup failed:', error)
+  }
+}
+
+void cleanupExpiredXoomshareRooms()
+setInterval(() => {
+  void cleanupExpiredXoomshareRooms()
+}, XOOMSHARE_CLEANUP_INTERVAL_MS)
 
 const app = new Elysia()
   .use(
@@ -126,8 +229,12 @@ const app = new Elysia()
   )
   .ws('/ws', {
     message(ws, message: any) {
-      if (typeof message === 'object' && message !== null && message.type === 'subscribe' && typeof message.pageId === 'string') {
-        ws.subscribe(`page_${message.pageId}`)
+      let msg = message;
+      if (typeof message === 'string') {
+        try { msg = JSON.parse(message); } catch {}
+      }
+      if (typeof msg === 'object' && msg !== null && msg.type === 'subscribe' && msg.pageId != null) {
+        ws.subscribe(`page_${msg.pageId}`)
       }
     }
   })
@@ -495,6 +602,557 @@ const app = new Elysia()
       return { success: true, visibility: updatedUser[0]!.visibility }
     } catch {
       return { success: false, error: 'server error' }
+    }
+  })
+
+  // ══════════════════════════════════════════════
+  // ── Xoomshare API (anonymous rooms) ──
+  // ══════════════════════════════════════════════
+
+  // ── POST /xoomshare — Create an anonymous room ──
+  .post('/xoomshare', async ({ body, cookie: { xoomshare_session }, set }) => {
+    try {
+      let pathCode = normalizePathCode((body as XoomshareCreateBody | undefined)?.pathCode)
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const existing = await db.select().from(pages).where(eq(pages.pathCode, pathCode)).limit(1)
+        if (existing.length === 0) break
+        if ((body as XoomshareCreateBody | undefined)?.pathCode) {
+          set.status = 409
+          return { success: false, error: 'That secret page code is already in use' }
+        }
+        pathCode = generatePathCode()
+      }
+
+      const sessionId = crypto.randomUUID()
+      const expiresAt = new Date(Date.now() + XOOMSHARE_TTL_HOURS * 60 * 60 * 1000)
+      const newPage = await db.insert(pages).values({
+        userId: null,
+        color: `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`,
+        name: `Xoomshare ${pathCode}`,
+        visibility: 'public',
+        pathCode,
+        sessionId,
+        expiresAt,
+      }).returning()
+
+      if (newPage.length === 0) {
+        set.status = 500
+        return { success: false, error: 'Unable to create Xoomshare page' }
+      }
+
+      xoomshare_session?.set({
+        value: sessionId,
+        httpOnly: true,
+        secure: false,
+        sameSite: 'lax',
+        maxAge: XOOMSHARE_TTL_HOURS * 60 * 60,
+        path: '/',
+      })
+
+      set.status = 201
+      return {
+        success: true,
+        room: {
+          ...formatPage(newPage[0]!),
+          isOwner: true,
+        },
+      }
+    } catch (e: unknown) {
+      console.error('Create Xoomshare room failed:', e)
+
+      if (e instanceof ResourceValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+
+      set.status = 500
+      return { success: false, error: 'Unable to create Xoomshare page' }
+    }
+  })
+
+  // ── GET /xoomshare/:pathCode — Fetch an anonymous room ──
+  .get('/xoomshare/:pathCode', async ({ params, cookie: { xoomshare_session }, set }) => {
+    try {
+      // Find the main room entry via pathCode
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+
+      const sessionId = room[0]!.sessionId;
+      const isOwner = xoomshare_session?.value === sessionId;
+      const callerSession = xoomshare_session?.value || null;
+
+      // Fetch all pages sharing this sessionId (multi-page support)
+      let allPages = [];
+      if (sessionId) {
+        allPages = await db.select().from(pages).where(eq(pages.sessionId, sessionId));
+      } else {
+        // Fallback for very old rooms without sessionId (unlikely but safe)
+        allPages = [room[0]!];
+      }
+
+      const pageIds = allPages.map(p => p.id);
+      
+      // Fetch all resources across all pages in the room
+      let pageResources: typeof resources.$inferSelect[] = [];
+      if (pageIds.length > 0) {
+         pageResources = await db.select().from(resources).where(inArray(resources.pageId, pageIds));
+      }
+
+      return {
+        success: true,
+        room: {
+          ...formatPage(room[0]!),
+          isOwner,
+          allowGuestResources: room[0]!.allowGuestResources,
+        },
+        pages: allPages.map(p => formatPage(p)),
+        resources: pageResources.map(r => ({
+          ...formatResource(r),
+          isOwner: isOwner || (!!callerSession && r.sessionId === callerSession),
+        })),
+      }
+    } catch (e) {
+      console.error('Fetch Xoomshare room failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to load Xoomshare page' }
+    }
+  })
+
+  // ── POST /xoomshare/:pathCode/pages — Add a new page to an anonymous room ──
+  .post('/xoomshare/:pathCode/pages', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare room not found or expired' }
+      }
+
+      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+        set.status = 403
+        return { success: false, error: 'Only the creator can add pages' }
+      }
+
+      // Check page limit (e.g., max 10 pages)
+      const existingPages = await db.select().from(pages).where(eq(pages.sessionId, room[0]!.sessionId!))
+      if (existingPages.length >= 10) {
+        set.status = 400
+        return { success: false, error: 'Maximum of 10 pages allowed per Xoomshare room' }
+      }
+
+      const { name } = (body || {}) as { name?: string }
+      const newPageName = name || `Page ${existingPages.length + 1}`
+      const vibrantColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`
+
+      const newPage = await db.insert(pages).values({
+        userId: null,
+        color: vibrantColor,
+        name: newPageName,
+        visibility: 'public',
+        pathCode: null, // Only the root page has the pathCode
+        sessionId: room[0]!.sessionId,
+        expiresAt: room[0]!.expiresAt,
+      }).returning()
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'page_added', pageId: newPage[0]!.id }))
+      }
+
+      set.status = 201
+      return { success: true, page: formatPage(newPage[0]!) }
+    } catch (e) {
+      console.error('Create Xoomshare page failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to create page' }
+    }
+  })
+
+  // ── PATCH /xoomshare/:pathCode/pages/:id — Rename a page in an anonymous room ──
+  .patch('/xoomshare/:pathCode/pages/:id', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare room not found or expired' }
+      }
+
+      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+        set.status = 403
+        return { success: false, error: 'Only the creator can rename pages' }
+      }
+
+      const { name } = body as { name: string }
+      if (!name || name.trim() === '') {
+        set.status = 400
+        return { success: false, error: 'Name is required' }
+      }
+
+      const pageToUpdate = await db.select().from(pages).where(
+        and(eq(pages.id, params.id), eq(pages.sessionId, room[0]!.sessionId!))
+      ).limit(1)
+
+      if (pageToUpdate.length === 0) {
+        set.status = 404
+        return { success: false, error: 'Page not found in this room' }
+      }
+
+      const updatedPage = await db.update(pages)
+        .set({ name: name.trim() })
+        .where(eq(pages.id, params.id))
+        .returning()
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'page_updated', pageId: params.id }))
+      }
+
+      return { success: true, page: formatPage(updatedPage[0]!) }
+    } catch (e) {
+      console.error('Rename Xoomshare page failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to rename page' }
+    }
+  })
+
+  // ── DELETE /xoomshare/:pathCode/pages/:id — Delete a page in an anonymous room ──
+  .delete('/xoomshare/:pathCode/pages/:id', async ({ params, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare room not found or expired' }
+      }
+
+      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+        set.status = 403
+        return { success: false, error: 'Only the creator can delete pages' }
+      }
+
+      // Check if it's the last page
+      const existingPages = await db.select().from(pages).where(eq(pages.sessionId, room[0]!.sessionId!))
+      if (existingPages.length <= 1) {
+        set.status = 400
+        return { success: false, error: 'Cannot delete the only page in the room' }
+      }
+
+      const pageToDelete = existingPages.find(p => p.id === params.id)
+      if (!pageToDelete) {
+        set.status = 404
+        return { success: false, error: 'Page not found in this room' }
+      }
+      
+      // If deleting the root page (which holds the pathCode), move the pathCode to another page
+      if (pageToDelete.pathCode) {
+        const nextRoot = existingPages.find(p => p.id !== params.id)
+        if (nextRoot) {
+          await db.update(pages).set({ pathCode: pageToDelete.pathCode }).where(eq(pages.id, nextRoot.id))
+        }
+      }
+
+      await db.delete(pages).where(eq(pages.id, params.id))
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'page_deleted', pageId: params.id }))
+      }
+
+      return { success: true }
+    } catch (e) {
+      console.error('Delete Xoomshare page failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to delete page' }
+    }
+  })
+
+
+  // ── PATCH /xoomshare/:pathCode/settings — Toggle room settings (creator only) ──
+  .patch('/xoomshare/:pathCode/settings', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+
+      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+        set.status = 403
+        return { success: false, error: 'Only the creator can change settings' }
+      }
+
+      const { allowGuestResources } = body as { allowGuestResources?: boolean }
+      if (typeof allowGuestResources !== 'boolean') {
+        set.status = 400
+        return { success: false, error: 'allowGuestResources must be a boolean' }
+      }
+
+      // Update all pages in the room
+      const sessionId = room[0]!.sessionId!
+      await db.update(pages).set({ allowGuestResources }).where(eq(pages.sessionId, sessionId))
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'settings_updated' }))
+      }
+
+      return { success: true, allowGuestResources }
+    } catch (e) {
+      console.error('Update Xoomshare settings failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to update settings' }
+    }
+  })
+
+  // ── DELETE /xoomshare/:pathCode — Destroy an entire anonymous room (creator only) ──
+  .delete('/xoomshare/:pathCode', async ({ params, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+
+      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+        set.status = 403
+        return { success: false, error: 'Only the creator can destroy the session' }
+      }
+
+      const sessionId = room[0]!.sessionId!
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'room_destroyed' }))
+      }
+
+      await db.delete(pages).where(eq(pages.sessionId, sessionId))
+
+      return { success: true }
+    } catch (e) {
+      console.error('Destroy Xoomshare session failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to destroy session' }
+    }
+  })
+
+  // ── POST /xoomshare/:pathCode/resources — Add a resource to an anonymous room ──
+  .post('/xoomshare/:pathCode/resources', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+
+      const isRoomOwner = xoomshare_session?.value && xoomshare_session.value === room[0]!.sessionId
+      if (!isRoomOwner && !room[0]!.allowGuestResources) {
+        set.status = 403
+        return { success: false, error: 'Only the device that created this Xoomshare page can add resources' }
+      }
+
+      const requestBody = body as { type?: unknown; content?: unknown; title?: unknown; x?: unknown; y?: unknown; pageId?: unknown }
+      const { type, content, title, x, y, pageId } = requestBody
+
+      if (!isResourceType(type)) {
+        throw new ResourceValidationError('Resource type is not supported')
+      }
+
+      const requestContent = getRequiredString(content, 'Resource content')
+      const requestTitle = getOptionalString(title)
+      const resourceX = normalizeResourceCoordinate(x, randomResourceCoordinate())
+      const resourceY = normalizeResourceCoordinate(y, randomResourceCoordinate())
+      const requestedPageId = typeof pageId === 'string' && pageId.trim().length > 0 ? pageId.trim() : room[0]!.id
+
+      let targetPage = room[0]!
+      if (requestedPageId !== room[0]!.id) {
+        if (!room[0]!.sessionId) {
+          set.status = 404
+          return { success: false, error: 'Target page not found in this room' }
+        }
+
+        const pageInRoom = await db.select().from(pages).where(
+          and(eq(pages.id, requestedPageId), eq(pages.sessionId, room[0]!.sessionId))
+        ).limit(1)
+
+        if (pageInRoom.length === 0) {
+          set.status = 404
+          return { success: false, error: 'Target page not found in this room' }
+        }
+
+        targetPage = pageInRoom[0]!
+      }
+
+      let finalContent = requestContent
+      let finalTitle = requestTitle
+      let finalDescription = null
+      let finalThumbnailUrl = null
+
+      if (type === 'image' || type === 'pdf' || type === 'file') {
+        if (requestContent.startsWith('data:')) {
+          finalContent = await uploadResource(requestContent, type)
+        }
+      } else if (type === 'link') {
+        const parsedUrl = new URL(requestContent)
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+          throw new ResourceValidationError('Only http and https links are supported')
+        }
+
+        const ogData = await fetchOpenGraphData(requestContent)
+        if (ogData.title) finalTitle = ogData.title
+        finalDescription = ogData.description
+        finalThumbnailUrl = ogData.thumbnailUrl
+      }
+
+      const newResource = await db.insert(resources).values({
+        pageId: targetPage.id,
+        type,
+        content: finalContent,
+        title: finalTitle,
+        description: finalDescription,
+        thumbnailUrl: finalThumbnailUrl,
+        x: resourceX,
+        y: resourceY,
+        sessionId: (xoomshare_session?.value as string) || null,
+      }).returning()
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'resource_updated' }))
+      }
+
+      set.status = 201
+      return { success: true, resource: formatResource(newResource[0]!) }
+    } catch (e: unknown) {
+      console.error('Create Xoomshare resource failed:', e)
+
+      if (e instanceof ResourceValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+
+      if (e instanceof TypeError) {
+        set.status = 400
+        return { success: false, error: 'Link URL is invalid.' }
+      }
+
+      if (e instanceof ImageValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+
+      if (e instanceof CloudinaryConfigurationError) {
+        set.status = 500
+        return { success: false, error: 'Uploads are not configured correctly.' }
+      }
+
+      if (e instanceof ImageUploadError) {
+        set.status = 502
+        return { success: false, error: 'Upload failed. Please try again.' }
+      }
+
+      set.status = 500
+      return { success: false, error: 'Unable to save this resource right now. Please try again.' }
+    }
+  })
+
+  // ── PATCH /xoomshare/:pathCode/resources/:id/position — Move an anonymous resource ──
+  .patch('/xoomshare/:pathCode/resources/:id/position', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+
+      const isRoomOwner = xoomshare_session?.value && xoomshare_session.value === room[0]!.sessionId
+      // We'll check resource-level ownership below after fetching the resource
+
+      const { x, y } = body as { x?: unknown; y?: unknown }
+      const resourceX = normalizeResourceCoordinate(x, 100)
+      const resourceY = normalizeResourceCoordinate(y, 100)
+      const roomPages = room[0]!.sessionId
+        ? await db.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, room[0]!.sessionId))
+        : [{ id: room[0]!.id }]
+      const roomPageIds = roomPages.map((page) => page.id)
+
+      // Fetch resource first to check ownership
+      const [existingResource] = await db.select().from(resources)
+        .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
+        .limit(1)
+
+      if (!existingResource) {
+        set.status = 404
+        return { success: false, error: 'Resource not found' }
+      }
+
+      const isResourceOwner = !!xoomshare_session?.value && existingResource.sessionId === xoomshare_session.value
+      if (!isRoomOwner && !isResourceOwner) {
+        set.status = 403
+        return { success: false, error: 'You can only move your own resources' }
+      }
+
+      const [updatedResource] = await db.update(resources)
+        .set({ x: resourceX, y: resourceY })
+        .where(eq(resources.id, params.id))
+        .returning()
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'resource_updated' }))
+      }
+
+      return { success: true, resource: formatResource(updatedResource!) }
+    } catch (e: unknown) {
+      console.error('Update Xoomshare resource position failed:', e)
+
+      if (e instanceof ResourceValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+
+      set.status = 500
+      return { success: false, error: 'Unable to move this resource right now.' }
+    }
+  })
+
+  // ── DELETE /xoomshare/:pathCode/resources/:id — Delete an anonymous resource ──
+  .delete('/xoomshare/:pathCode/resources/:id', async ({ params, cookie: { xoomshare_session }, set }) => {
+    try {
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+
+      const isRoomOwner = xoomshare_session?.value && xoomshare_session.value === room[0]!.sessionId
+
+      const roomPages = room[0]!.sessionId
+        ? await db.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, room[0]!.sessionId))
+        : [{ id: room[0]!.id }]
+      const roomPageIds = roomPages.map((page) => page.id)
+
+      // Fetch resource to check ownership
+      const [existingResource] = await db.select().from(resources)
+        .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
+        .limit(1)
+
+      if (!existingResource) {
+        set.status = 404
+        return { success: false, error: 'Resource not found' }
+      }
+
+      const isResourceOwner = !!xoomshare_session?.value && existingResource.sessionId === xoomshare_session.value
+      if (!isRoomOwner && !isResourceOwner) {
+        set.status = 403
+        return { success: false, error: 'You can only delete your own resources' }
+      }
+
+      await db.delete(resources).where(eq(resources.id, params.id))
+
+      if (app.server) {
+        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'resource_updated' }))
+      }
+
+      return { success: true }
+    } catch (e) {
+      console.error('Delete Xoomshare resource failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to delete this resource right now.' }
     }
   })
 
