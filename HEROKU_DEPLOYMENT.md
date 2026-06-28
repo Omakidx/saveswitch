@@ -11,7 +11,7 @@ Saveswitch should run as two Heroku apps:
 | `saveswitch-api` | `server/` | Bun + Elysia | REST API, Google OAuth callback, WebSocket sync, database access |
 | `saveswitch-web` | `client/` | Bun + Next.js | UI, dashboard, Xoomshare pages, login/register |
 
-The guide uses the Heroku CLI plus Heroku Container Registry. That fits this repo because both apps are Bun-first and live in subdirectories. The repo now includes the deploy helper and container files:
+The guide uses the Heroku CLI plus Heroku remote Docker builds. That fits this repo because both apps are Bun-first and live in subdirectories, and it does not require Docker to be installed locally. The repo now includes the deploy helper and container files:
 
 | File | Purpose |
 |------|---------|
@@ -77,8 +77,8 @@ Install and verify the local tools:
 
 ```bash
 heroku --version
-docker --version
 bun --version
+git --version
 git status --short
 ```
 
@@ -314,34 +314,25 @@ test -n "$API_URL"
 test -n "$PUBLIC_GOOGLE_CLIENT_ID"
 ```
 
-Deploy the API:
+Make sure the deployment files are committed before pushing subtrees:
 
 ```bash
-docker build \
-  -f server/Dockerfile \
-  -t "registry.heroku.com/$API_APP/web" \
-  server
-
-docker push "registry.heroku.com/$API_APP/web"
-heroku container:release web --app "$API_APP"
+git status --short
 ```
 
-Deploy the web app:
+Deploy the API with a Heroku remote Docker build:
 
 ```bash
-docker build \
-  -f client/Dockerfile \
-  --build-arg NEXT_PUBLIC_API_BASE="$API_URL" \
-  --build-arg NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-$API_URL}" \
-  --build-arg NEXT_PUBLIC_GOOGLE_CLIENT_ID="$PUBLIC_GOOGLE_CLIENT_ID" \
-  -t "registry.heroku.com/$WEB_APP/web" \
-  client
-
-docker push "registry.heroku.com/$WEB_APP/web"
-heroku container:release web --app "$WEB_APP"
+git subtree push --prefix server "https://git.heroku.com/$API_APP.git" main
 ```
 
-Why the web build args matter: `NEXT_PUBLIC_*` values are compiled into the Next.js client bundle. If `NEXT_PUBLIC_API_BASE` changes, rebuild and redeploy the web image.
+Deploy the web app with a Heroku remote Docker build:
+
+```bash
+git subtree push --prefix client "https://git.heroku.com/$WEB_APP.git" main
+```
+
+Why `client/heroku.yml` matters: `NEXT_PUBLIC_*` values are compiled into the Next.js client bundle. If `NEXT_PUBLIC_API_BASE` changes, update `client/heroku.yml`, commit it, and redeploy the web app.
 
 ---
 
@@ -450,7 +441,7 @@ The web app is easier to scale horizontally because it does not own room state.
 | Browser CORS error | `CLIENT_ORIGIN` does not equal the web origin | Update `.env.local`, rerun API config, restart API. |
 | Google redirect mismatch | Google Console and `GOOGLE_REDIRECT_URI` disagree | Update Google Console and rerun section 6. |
 | One Tap missing | Missing `NEXT_PUBLIC_GOOGLE_CLIENT_ID` at build time | Reload env, rebuild, redeploy the web image. |
-| Client calls localhost | Web image was built without `NEXT_PUBLIC_API_BASE` | Rebuild web with the section 9 build args. |
+| Client calls localhost | Web image was built without the production API URL | Update `client/heroku.yml`, commit it, and redeploy web. |
 | Next app fails to bind | It is not listening on Heroku's `$PORT` | Use the Docker `CMD` from section 8.2. |
 | Image upload fails | Cloudinary value is wrong or lacks upload permission | Verify `CLOUDINARY_URL` and API key permissions. |
 | WebSocket sync works in one tab but not another user/session | API was scaled across dynos without shared pub/sub | Scale API back to one dyno or add shared fanout. |
@@ -462,13 +453,13 @@ The web app is easier to scale horizontally because it does not own room state.
 - [ ] `.env.local` has production values.
 - [ ] `HEROKU_API_APP` and `HEROKU_WEB_APP` are set or you are using the default app names.
 - [ ] Heroku CLI is logged in.
-- [ ] Docker registry login succeeded.
+- [ ] Heroku browser login succeeded.
 - [ ] Heroku config vars were pushed from `.env.local`.
 - [ ] Google OAuth origin and redirect URI match production.
 - [ ] `server/Dockerfile` and `client/Dockerfile` exist.
 - [ ] Database schema has been applied.
 - [ ] API image was built, pushed, and released.
-- [ ] Web image was built with `NEXT_PUBLIC_*` args, pushed, and released.
+- [ ] Web image was built with production `NEXT_PUBLIC_*` values, pushed, and released.
 - [ ] `/health` returns `ok`.
 - [ ] Login, Xoomshare, WebSocket sync, and uploads pass smoke testing.
 
@@ -493,5 +484,5 @@ The script does the same core work as the manual sections:
 1. Load `.env.local`.
 2. Derive `API_APP`, `WEB_APP`, `API_URL`, `WEB_URL`, and `PUBLIC_GOOGLE_CLIENT_ID`.
 3. Push Heroku config vars.
-4. Build/push/release the selected image.
+4. Push the selected subtree so Heroku builds and releases the image remotely.
 5. Run the smoke-test commands.

@@ -12,13 +12,14 @@ Usage: bash scripts/deploy-heroku.sh <action>
 Actions:
   create   Create Heroku apps and set the container stack
   config   Push config vars from .env.local to Heroku
-  api      Build, push, and release the API app
-  web      Build, push, and release the web app
+  api      Push the server subtree for a Heroku remote Docker build
+  web      Push the client subtree for a Heroku remote Docker build
   schema   Push the Drizzle schema to DATABASE_URL
   smoke    Run basic production checks
   all      Run config, api, web, and smoke
 
 The script reads credentials from the root .env.local file.
+Commit deployment file changes before running api, web, or all.
 EOF
 }
 
@@ -121,34 +122,17 @@ push_config() {
 }
 
 deploy_api() {
-  need_tool docker
-  need_tool heroku
+  need_tool git
   require_api_env
 
-  docker build \
-    -f "$ROOT_DIR/server/Dockerfile" \
-    -t "registry.heroku.com/$API_APP/web" \
-    "$ROOT_DIR/server"
-
-  docker push "registry.heroku.com/$API_APP/web"
-  heroku container:release web --app "$API_APP"
+  git -C "$ROOT_DIR" subtree push --prefix server "https://git.heroku.com/$API_APP.git" main
 }
 
 deploy_web() {
-  need_tool docker
-  need_tool heroku
+  need_tool git
   require_web_env
 
-  docker build \
-    -f "$ROOT_DIR/client/Dockerfile" \
-    --build-arg NEXT_PUBLIC_API_BASE="$API_URL" \
-    --build-arg NEXT_PUBLIC_API_URL="$PUBLIC_API_URL" \
-    --build-arg NEXT_PUBLIC_GOOGLE_CLIENT_ID="$PUBLIC_GOOGLE_CLIENT_ID" \
-    -t "registry.heroku.com/$WEB_APP/web" \
-    "$ROOT_DIR/client"
-
-  docker push "registry.heroku.com/$WEB_APP/web"
-  heroku container:release web --app "$WEB_APP"
+  git -C "$ROOT_DIR" subtree push --prefix client "https://git.heroku.com/$WEB_APP.git" main
 }
 
 push_schema() {
