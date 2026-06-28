@@ -134,7 +134,11 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const [isCanvasMode, setIsCanvasMode] = useState<boolean>(initialState.isCanvasMode ?? false);
   const [activeCategory, setActiveCategory] = useState<Category>(initialState.activeCategory ?? "target");
   const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(initialState.sidebarCollapsed ?? false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (initialState.sidebarCollapsed !== undefined) return initialState.sidebarCollapsed;
+    if (typeof window !== "undefined") return window.innerWidth < 768;
+    return false;
+  });
   const [selectedDate, setSelectedDate] = useState<string | null>(initialState.selectedDate ?? null);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(initialState.expandedDates ?? new Set());
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -830,7 +834,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const canAddResources = room.isOwner || room.allowGuestResources;
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-black font-inter text-white">
+    <div className="flex h-dvh w-full overflow-hidden bg-black font-inter text-white">
       <DashboardSidebar
         user={null}
         dateGroups={dateGroups}
@@ -854,7 +858,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       />
 
       <main
-        className="relative flex h-screen flex-1 flex-col overflow-hidden"
+        className="relative flex h-dvh flex-1 flex-col overflow-hidden"
         style={{ background: "var(--color-app-bg)" }}
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => {
@@ -866,17 +870,16 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       >
         <div className="relative flex flex-1 flex-col overflow-hidden bg-black">
           <div
-            className="absolute top-6 z-40 flex items-center gap-3 transition-[left] duration-200"
-            style={{ left: sidebarCollapsed ? 88 : 24 }}
+            className="absolute left-4 right-4 top-4 z-40 flex max-w-[calc(100vw-32px)] flex-wrap items-center gap-2 transition-[left] duration-200 sm:left-6 sm:right-auto sm:top-6 sm:max-w-[calc(100vw-280px)] sm:gap-3 md:left-6"
           >
             <button
               type="button"
               onClick={handleCopyShareLink}
-              className="flex h-9 cursor-pointer items-center gap-2 rounded-full border border-white/15 bg-[#0A0A0A] px-4 text-[11px] font-bold text-white shadow-[0_8px_24px_rgba(0,0,0,0.24)] transition-colors hover:border-white/25 hover:bg-white/10"
+              className="flex h-9 min-w-0 cursor-pointer items-center gap-2 rounded-full border border-white/15 bg-[#0A0A0A] px-3 text-[11px] font-bold text-white shadow-[0_8px_24px_rgba(0,0,0,0.24)] transition-colors hover:border-white/25 hover:bg-white/10 sm:px-4"
               title="Copy Xoomshare link"
             >
               <span className="text-white/70">Xoomshare</span>
-              <span>{room.pathCode}</span>
+              <span className="min-w-0 truncate">{room.pathCode}</span>
               <Image src="/images/copy-icon.svg" alt="Copy Link" width={16} height={16} className="ml-1 opacity-90" />
             </button>
             {room.isOwner ? (
@@ -920,7 +923,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
             ) : null}
           </div>
 
-          <div className="absolute right-8 top-8 z-40">
+          <div className="absolute right-4 top-24 z-40 sm:right-8 sm:top-8">
             <CategorySwitch activeCategory={activeCategory} onChange={setActiveCategory} />
           </div>
 
@@ -965,15 +968,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
             </div>
           </InfiniteCanvas>
 
-          <div
-            className="absolute"
-            style={{
-              right: 66,
-              top: "50%",
-              transform: "translateY(-50%)",
-              zIndex: 10,
-            }}
-          >
+          <div className="absolute right-3 top-1/2 z-10 -translate-y-1/2 sm:right-[66px]">
             <ResourceMiniPanel
               pages={pages}
               activePageId={activePageId || room.id}
@@ -984,7 +979,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
             />
           </div>
 
-          <div className="absolute bottom-6 right-6 z-40">
+          <div className="absolute bottom-4 right-4 z-40 sm:bottom-6 sm:right-6">
             <FloatingActionButton
               onClick={() => setIsCanvasMode((prev) => !prev)}
               onPaste={handlePaste}
@@ -996,7 +991,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       </main>
 
       {confirmModal && confirmModal.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-auto">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 pointer-events-auto">
           {/* Backdrop */}
           <div 
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -1007,8 +1002,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
           <div 
             className="relative bg-[var(--color-surface)] border border-[var(--color-surface-border)] rounded-2xl shadow-2xl p-6 flex flex-col gap-4"
             style={{ 
-              width: 420, 
-              maxWidth: '90vw',
+              width: "min(420px, calc(100vw - 32px))",
               animation: "modal-zoom-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards"
             }}
           >
@@ -1018,7 +1012,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
             <p className="font-arimo text-[15px] m-0 leading-relaxed" style={{ color: "var(--color-text-primary)", opacity: 0.8 }}>
               {confirmModal.message}
             </p>
-            <div className="flex justify-end gap-3 mt-4">
+            <div className="mt-4 flex flex-wrap justify-end gap-3">
               <button
                 type="button"
                 onClick={() => setConfirmModal(null)}
@@ -1049,11 +1043,11 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
         </div>
       )}
 
-      <div className="pointer-events-none fixed bottom-8 right-8 z-50 flex flex-col gap-3">
+      <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-50 flex flex-col items-end gap-3 sm:bottom-8 sm:left-auto sm:right-8">
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className="pointer-events-auto flex items-center gap-3 rounded-xl px-5 py-3.5 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+            className="pointer-events-auto flex w-full items-center gap-3 rounded-xl px-4 py-3.5 shadow-[0_8px_30px_rgba(0,0,0,0.3)] sm:w-auto sm:px-5"
             style={{
               maxWidth: "min(420px, calc(100vw - 32px))",
               background:

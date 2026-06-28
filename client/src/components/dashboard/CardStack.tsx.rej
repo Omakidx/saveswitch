@@ -1,0 +1,12 @@
+--- CardStack.tsx
++++ CardStack.tsx
+@@ -147,7 +147,9 @@
+       <div
+         className="relative transition-all duration-500 ease-out"
+         style={{
+           width: isExpanded ? "100%" : 662,
+           height: isExpanded ? "100%" : 372,
++          minWidth: isExpanded ? "auto" : 662,
++          minHeight: isExpanded ? "auto" : 372,
+           transform: isExpanded ? "none" : `scale(${stackScale})`,
+           transformOrigin: "center",

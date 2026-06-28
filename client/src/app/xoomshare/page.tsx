@@ -41,7 +41,7 @@ export default function CreateXoomsharePage() {
   };
 
   return (
-    <main className="min-h-screen w-full bg-black font-inter text-white">
+    <main className="min-h-dvh w-full bg-black font-inter text-white">
       <Link
         href="/login"
         className="absolute left-6 top-6 flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
@@ -51,11 +51,11 @@ export default function CreateXoomsharePage() {
           <path d="M15 6 9 12l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </Link>
-      <div className="flex min-h-screen items-center justify-center px-6">
+      <div className="flex min-h-dvh items-center justify-center px-6 py-8">
         <form onSubmit={handleCreate} className="flex w-full max-w-[320px] flex-col items-center">
           <label
             htmlFor="xoomshare-code"
-            className="mb-8 w-[280px] text-center text-[13px] font-bold leading-[18px] text-white"
+            className="mb-8 w-full max-w-[280px] text-center text-[13px] font-bold leading-[18px] text-white"
           >
             Create your unique page destination path for your resources
           </label>
@@ -66,9 +66,11 @@ export default function CreateXoomsharePage() {
               value={pathCode}
               onChange={(event) => setPathCode(event.target.value)}
               autoFocus
+              autoComplete="off"
               spellCheck={false}
               placeholder="My Secret Page For Videos I Found Online"
-              className="h-10 min-w-0 flex-1 bg-transparent px-0 text-center text-[11px] font-medium leading-none text-white outline-none placeholder:text-[#5d5d5d]"
+              className="h-10 min-w-0 flex-1 border-none bg-transparent px-0 text-center text-[11px] font-medium leading-none text-white !outline-none focus:!border-none focus:!outline-none focus:!ring-0 placeholder:text-[#5d5d5d]"
+              style={{ boxShadow: 'none', border: 'none', outline: 'none' }}
               aria-label="Secret page code"
             />
             <button

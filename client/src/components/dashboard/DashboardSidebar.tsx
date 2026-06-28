@@ -69,15 +69,7 @@ export default function DashboardSidebar({
       <button
         type="button"
         onClick={onToggleCollapse}
-        className="fixed z-50 flex items-center justify-center cursor-pointer border border-white/10 transition-all duration-200 hover:scale-110 hover:shadow-xl active:scale-95"
-        style={{
-          width: 48,
-          height: 48,
-          background: "#191818",
-          borderRadius: 24,
-          left: 24,
-          top: 24,
-        }}
+        className="fixed left-4 top-4 z-50 flex h-12 w-12 cursor-pointer items-center justify-center rounded-full border border-white/10 bg-[#191818] transition-all duration-200 hover:scale-110 hover:shadow-xl active:scale-95 sm:left-6 sm:top-6"
         aria-label="Expand sidebar"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -95,8 +87,8 @@ export default function DashboardSidebar({
 
   return (
     <aside
-      className="relative flex flex-col shrink-0 h-screen"
-      style={{ width: 247, background: "var(--color-sidebar-bg)" }}
+      className="fixed inset-y-0 left-0 z-50 flex h-dvh w-[min(247px,calc(100vw-16px))] shrink-0 flex-col border-r border-white/10 md:relative md:z-auto md:w-[247px]"
+      style={{ background: "var(--color-sidebar-bg)" }}
     >
       {/* ── Header / Logo Area ── */}
       <div className="flex flex-col p-2" style={{ height: 64 }}>
@@ -137,7 +129,7 @@ export default function DashboardSidebar({
       {/* ── Date Navigation List ── */}
       <nav
         className="flex flex-col gap-1 overflow-y-auto flex-1"
-        style={{ padding: "8px", width: 247 }}
+        style={{ padding: "8px", width: "100%" }}
       >
         {dateGroups.map((group) => (
           <SidebarDateEntry
@@ -284,6 +276,17 @@ export default function DashboardSidebar({
 
           <div
             className="flex items-center gap-2 rounded-md p-2 cursor-pointer hover:bg-white/5 transition-colors"
+            role="button"
+            tabIndex={0}
+            aria-expanded={isProfileExpanded}
+            onClick={() => !readOnly && setIsProfileExpanded((prev) => !prev)}
+            onKeyDown={(event) => {
+              if (readOnly) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setIsProfileExpanded((prev) => !prev);
+              }
+            }}
             style={{
               width: "100%",
               height: 48,
@@ -477,42 +480,24 @@ function SidebarDateEntry({
           >
             {group.pages.map((page) => {
               const isEditing = editingId === page.id;
-              
-              return (
-                <div
-                  key={page.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onPageSelect(page.id);
-                  }}
-                  onDoubleClick={(e) => {
-                    if (readOnly) return;
-                    e.stopPropagation();
-                    setEditingId(page.id);
-                    setEditName(page.name);
-                  }}
-                  onContextMenu={(e) => {
-                    if (readOnly) return;
-                    e.preventDefault();
-                    setContextMenu({ pageId: page.id, x: e.clientX, y: e.clientY });
-                  }}
-                  className="flex items-center gap-2 rounded-md cursor-pointer hover:bg-white/10 transition-colors duration-150 w-full"
-                  style={{
-                    padding: "0 8px",
-                    height: 28,
-                    borderRadius: 6,
-                    background: activePageId === page.id ? "rgba(255, 255, 255, 0.1)" : "transparent",
-                  }}
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src="/icons/icon-browser.svg"
-                    alt=""
-                    width={18}
-                    height={18}
-                    className="shrink-0 opacity-70"
-                  />
-                  {isEditing ? (
+
+              if (isEditing) {
+                return (
+                  <div
+                    key={page.id}
+                    className="flex h-8 w-full items-center gap-2 rounded-md px-2"
+                    style={{
+                      background: activePageId === page.id ? "rgba(255, 255, 255, 0.1)" : "transparent",
+                    }}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src="/icons/icon-browser.svg"
+                      alt=""
+                      width={18}
+                      height={18}
+                      className="shrink-0 opacity-70"
+                    />
                     <input
                       type="text"
                       autoFocus
@@ -532,15 +517,67 @@ function SidebarDateEntry({
                         onPageUpdateName(page.id, editName);
                         setEditingId(null);
                       }}
-                      className="font-arimo text-[13px] leading-5 flex-1 bg-transparent border-none outline-none text-white w-full"
+                      className="w-full flex-1 bg-transparent font-arimo text-[13px] leading-5 text-white outline-none"
                     />
-                  ) : (
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={page.id}
+                  className="group/page relative flex w-full items-center gap-1"
+                >
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPageSelect(page.id);
+                    }}
+                    onDoubleClick={(e) => {
+                      if (readOnly) return;
+                      e.stopPropagation();
+                      setEditingId(page.id);
+                      setEditName(page.name);
+                    }}
+                    onContextMenu={(e) => {
+                      if (readOnly) return;
+                      e.preventDefault();
+                      setContextMenu({ pageId: page.id, x: e.clientX, y: e.clientY });
+                    }}
+                    className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md border-none bg-transparent px-2 text-left transition-colors duration-150 hover:bg-white/10"
+                    style={{
+                      background: activePageId === page.id ? "rgba(255, 255, 255, 0.1)" : "transparent",
+                    }}
+                    title={page.name}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src="/icons/icon-browser.svg"
+                      alt=""
+                      width={18}
+                      height={18}
+                      className="shrink-0 opacity-70"
+                    />
                     <span
                       className="font-arimo text-[13px] leading-5 truncate flex-1 select-none"
                       style={{ color: "var(--color-text-primary)" }}
                     >
                       {page.name}
                     </span>
+                  </button>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setContextMenu({ pageId: page.id, x: e.clientX, y: e.clientY });
+                      }}
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border-none bg-transparent opacity-100 transition-colors hover:bg-white/10 sm:opacity-0 sm:group-hover/page:opacity-100 sm:focus-visible:opacity-100"
+                      aria-label={`Page actions for ${page.name}`}
+                    >
+                      <span className="text-white/60" aria-hidden="true">...</span>
+                    </button>
                   )}
                 </div>
               );

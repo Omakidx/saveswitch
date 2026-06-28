@@ -55,7 +55,7 @@ const CATEGORIES: { id: Category; icon: React.ReactNode }[] = [
 export default function CategorySwitch({ activeCategory, onChange }: CategorySwitchProps) {
   return (
     <div
-      className="flex items-center rounded-full shadow-lg"
+      className="flex max-w-[calc(100vw-32px)] items-center rounded-full shadow-lg"
       style={{ background: "#0A0A0A", border: "1px solid #242424", height: 38, padding: "2px" }}
     >
       {CATEGORIES.map((cat) => {
@@ -65,14 +65,13 @@ export default function CategorySwitch({ activeCategory, onChange }: CategorySwi
             key={cat.id}
             type="button"
             onClick={() => onChange(cat.id)}
-            className="relative flex items-center justify-center cursor-pointer transition-all duration-300 rounded-full border-none outline-none"
+            className="relative flex h-full w-9 cursor-pointer items-center justify-center rounded-full border-none transition-all duration-300 sm:w-12"
             style={{
-              width: 48,
-              height: "100%",
               background: isActive ? "white" : "transparent",
               color: isActive ? "#000000" : "rgba(255, 255, 255, 0.7)",
             }}
-            aria-label={cat.id}
+            aria-label={`Show ${cat.id} resources`}
+            title={cat.id}
             onMouseEnter={(e) => {
               if (!isActive) e.currentTarget.style.color = "white";
             }}

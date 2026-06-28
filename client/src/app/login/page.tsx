@@ -34,15 +34,15 @@ export default function LoginPage() {
   return (
     <>
       <GoogleOneTap clientId={GOOGLE_CLIENT_ID} />
-      <div className="flex items-center justify-center min-h-screen w-full bg-[rgba(0,0,0,0.98)] font-inter">
-        <div className="flex flex-col items-center w-[370px]">
+      <div className="flex min-h-dvh w-full items-center justify-center bg-[rgba(0,0,0,0.98)] px-4 py-8 font-inter">
+        <div className="flex w-full max-w-[370px] flex-col items-center">
           {/* ── Main Card ── */}
-          <div className="w-[350px] rounded-lg">
-            <div className="flex flex-col items-center px-[30px] py-[15px] gap-1.5 bg-[#121212] rounded-[18px] w-[350px]">
+          <div className="w-full max-w-[350px] rounded-lg">
+            <div className="flex w-full flex-col items-center gap-1.5 rounded-[18px] bg-[#121212] px-[30px] py-[15px]">
               {/* Logo + Heading Block */}
-              <div className="relative w-[280px] h-[103.5px]">
+              <div className="flex w-full max-w-[280px] flex-col items-center gap-3">
                 {/* Logo row — centered */}
-                <div className="absolute top-0 left-0 flex justify-center w-[280px] h-[42px]">
+                <div className="flex h-[42px] w-full justify-center">
                   <Image
                     src="/images/login/saveswitch-logo.svg"
                     alt="Saveswitch"
@@ -53,7 +53,7 @@ export default function LoginPage() {
                 </div>
 
                 {/* Text block — below logo */}
-                <div className="absolute top-[56px] left-0 flex flex-col items-stretch gap-[3.5px] w-[280px]">
+                <div className="flex w-full flex-col items-stretch gap-[3.5px]">
                   <h1 className="text-[14.875px] leading-[21px] font-bold text-[#CBCCD2] text-center m-0">
                     Sign in to Saveswitch
                   </h1>
@@ -85,12 +85,12 @@ export default function LoginPage() {
               </div>
 
               {/* Continue with Google */}
-              <div className="w-[280px] bg-black rounded-[10px]">
+              <div className="w-full max-w-[280px] rounded-[10px] bg-black">
                 <button
                   type="button"
                   id="google-signin-btn"
                   onClick={handleGoogleSignIn}
-                  className="flex items-center justify-center gap-2 w-[276px] h-[28.5px] mx-auto bg-transparent border-none cursor-pointer rounded-[4px] shadow-[0px_1px_0px_0px_rgba(0,0,0,0.02),0px_2px_3px_-1px_rgba(0,0,0,0.08)] transition-opacity duration-150 hover:opacity-88 active:opacity-75"
+                  className="flex items-center justify-center gap-2 w-full max-w-[276px] h-[28.5px] mx-auto bg-transparent border-none cursor-pointer rounded-[4px] shadow-[0px_1px_0px_0px_rgba(0,0,0,0.02),0px_2px_3px_-1px_rgba(0,0,0,0.08)] transition-opacity duration-150 hover:opacity-88 active:opacity-75"
                 >
                   <Image
                     src="/images/login/google-icon.svg"
@@ -108,8 +108,8 @@ export default function LoginPage() {
           </div>
 
           {/* ── Footer: Sign-up link ── */}
-          <div className="w-[350px]">
-            <div className="flex flex-row items-center justify-center py-3.5 gap-[3.5px] whitespace-nowrap">
+          <div className="w-full max-w-[350px]">
+            <div className="flex flex-wrap items-center justify-center gap-x-1 gap-y-2 py-3.5">
               <span className="text-[11.375px] leading-[15.75px] font-normal text-[rgba(203,204,210,0.7)]">
                 Don&apos;t have an account?
               </span>

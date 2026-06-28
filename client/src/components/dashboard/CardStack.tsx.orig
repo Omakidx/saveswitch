@@ -145,12 +145,10 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
       style={{ width: stackWidth, height: stackHeight, maxWidth: "100%" }}
     >
       <div
-        className="relative transition-all duration-500 ease-out shrink-0"
+        className="relative transition-all duration-500 ease-out"
         style={{
           width: isExpanded ? "100%" : 662,
           height: isExpanded ? "100%" : 372,
-          minWidth: isExpanded ? "auto" : 662,
-          minHeight: isExpanded ? "auto" : 372,
           transform: isExpanded ? "none" : `scale(${stackScale})`,
           transformOrigin: "center",
         }}

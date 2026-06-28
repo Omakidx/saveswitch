@@ -149,14 +149,16 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
       {/* ── Zoom Controls ── */}
       {isActive && (
         <div 
-          className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 bg-[#1D1D1D] rounded-[20px] px-2 py-1 flex items-center gap-3 shadow-[0_8px_32px_rgba(0,0,0,0.4)] border border-white/10"
+          className="absolute bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[20px] border border-white/10 bg-[#1D1D1D] px-2 py-1 shadow-[0_8px_32px_rgba(0,0,0,0.4)] sm:bottom-8 sm:gap-3"
           onPointerDown={(e) => e.stopPropagation()}
           onWheel={(e) => e.stopPropagation()}
         >
           <button 
+            type="button"
             className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
             onClick={() => setZoom(z => Math.max(z - 0.1, 0.2))}
             title="Zoom Out"
+            aria-label="Zoom out"
           >
             -
           </button>
@@ -164,9 +166,11 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
             {Math.round(zoom * 100)}%
           </span>
           <button 
+            type="button"
             className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
             onClick={() => setZoom(z => Math.min(z + 0.1, 3))}
             title="Zoom In"
+            aria-label="Zoom in"
           >
             +
           </button>

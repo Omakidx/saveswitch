@@ -21,7 +21,7 @@ export default function JoinXoomsharePage() {
   };
 
   return (
-    <main className="min-h-screen w-full bg-black font-inter text-white">
+    <main className="min-h-dvh w-full bg-black font-inter text-white">
       <Link
         href="/xoomshare"
         className="absolute left-6 top-6 flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
@@ -31,7 +31,7 @@ export default function JoinXoomsharePage() {
           <path d="M15 6 9 12l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </Link>
-      <div className="flex min-h-screen items-center justify-center px-6">
+      <div className="flex min-h-dvh items-center justify-center px-6 py-8">
         <form onSubmit={handleJoin} className="flex w-full max-w-[320px] flex-col items-center">
           <label
             htmlFor="xoomshare-join-code"

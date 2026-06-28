@@ -115,7 +115,7 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
     <button 
       type="button"
       onClick={handleDeleteClick}
-      className="absolute bg-red-500 hover:bg-red-600 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 shadow-[0_2px_8px_rgba(0,0,0,0.5)] flex items-center justify-center border-none cursor-pointer hover:scale-110 z-30"
+      className="absolute z-30 flex cursor-pointer items-center justify-center rounded-full border-none bg-red-500 opacity-100 shadow-[0_2px_8px_rgba(0,0,0,0.5)] transition-all duration-200 hover:scale-110 hover:bg-red-600 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
       style={{ width: 24, height: 24, top: -10, right: -10 }}
       aria-label="Delete Resource"
       title="Delete Resource"
@@ -138,12 +138,12 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
         <div className={baseCardStyle} style={{ aspectRatio: '1/1.05' }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={resource.content} alt="Pasted Image" className="w-full h-full object-cover absolute inset-0 rounded-[12px] pointer-events-none" draggable={false} />
-          <div className="absolute left-3 bottom-3 bg-[#1D1D1D] rounded-[12px] flex items-center p-1.5 gap-1 shadow-lg opacity-0 group-hover:opacity-100 transition-opacity z-20">
-            <button onClick={(e) => { e.stopPropagation(); handleDownloadFile(resource.content, resource.title || 'image.png'); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center" title="Download Image">
+          <div className="absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-[12px] bg-[#1D1D1D] p-1.5 opacity-100 shadow-lg transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+            <button type="button" onClick={(e) => { e.stopPropagation(); handleDownloadFile(resource.content, resource.title || 'image.png'); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center" title="Download Image">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/icons/icon-download.svg" alt="Download" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
             </button>
-            <button onClick={(e) => handleCopyImage(e, resource.content)} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center" title="Copy Image">
+            <button type="button" onClick={(e) => handleCopyImage(e, resource.content)} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center" title="Copy Image">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="Copy" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
             </button>
@@ -165,13 +165,13 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
           <div className="px-1 flex flex-col gap-1 z-10">
              <h3 className="text-white font-bold text-[12px] m-0 line-clamp-1">{resource.title || 'Document.pdf'}</h3>
               <div className="mt-2 bg-[#1D1D1D] rounded-[12px] flex items-center p-0.5 gap-1 w-fit z-20">
-                <button onClick={(e) => handlePreview(resource.content, e, 'pdf')} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => handlePreview(resource.content, e, 'pdf')} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src="/icons/icon-document.svg" alt="Preview" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
-                <button onClick={(e) => { e.stopPropagation(); handleDownloadFile(resource.content, resource.title || 'document.pdf'); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => { e.stopPropagation(); handleDownloadFile(resource.content, resource.title || 'document.pdf'); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src="/icons/icon-download.svg" alt="Download" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
-                <button onClick={(e) => { e.stopPropagation(); handleCopy(`${window.location.origin}/link/download/${resource.id}`); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => { e.stopPropagation(); handleCopy(`${window.location.origin}/link/download/${resource.id}`); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="Copy" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
              </div>
@@ -198,13 +198,13 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
           <div className="px-1 flex flex-col gap-1 z-10">
              <h3 className="text-white font-bold text-[12px] m-0 line-clamp-1 break-all">{resource.title || 'Document.file'}</h3>
               <div className="mt-2 bg-[#1D1D1D] rounded-[12px] flex items-center p-0.5 gap-1 w-fit z-20">
-                <button onClick={(e) => handlePreview(resource.content, e, 'file')} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => handlePreview(resource.content, e, 'file')} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src="/icons/icon-document.svg" alt="Preview" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
-                <button onClick={(e) => { e.stopPropagation(); handleDownloadFile(resource.content, resource.title || 'file'); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => { e.stopPropagation(); handleDownloadFile(resource.content, resource.title || 'file'); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src="/icons/icon-download.svg" alt="Download" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
-                <button onClick={(e) => { e.stopPropagation(); handleCopy(`${window.location.origin}/link/download/${resource.id}`); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => { e.stopPropagation(); handleCopy(`${window.location.origin}/link/download/${resource.id}`); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="Copy" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
              </div>
@@ -232,10 +232,10 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
              )}
              
              <div className="mt-auto pt-2 bg-[#1D1D1D] rounded-[12px] flex items-center p-0.5 gap-1 w-fit">
-                <button className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center" aria-label="Open link">
                    <img src="/icons/icon-link.svg" alt="Link" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
-                <button onClick={(e) => { e.stopPropagation(); handleCopy(resource.content); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
+                <button type="button" onClick={(e) => { e.stopPropagation(); handleCopy(resource.content); }} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center">
                    <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="Copy" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
                 </button>
              </div>
@@ -251,7 +251,7 @@ export default function ResourceCard({ resource, onDelete, readOnly = false }: R
             <p className="text-white/80 text-sm whitespace-pre-wrap leading-relaxed m-0 font-arimo">{resource.content}</p>
           </div>
           <div className="mt-4 bg-[#1D1D1D] rounded-[12px] flex items-center p-0.5 gap-1 w-fit">
-            <button onClick={() => handleCopy(resource.content)} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center text-white text-xs gap-1 pr-3">
+            <button type="button" onClick={() => handleCopy(resource.content)} className="p-1.5 hover:bg-white/10 rounded-[8px] transition-colors border-none cursor-pointer flex items-center justify-center text-white text-xs gap-1 pr-3">
                <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="Copy" className="w-[16px] h-[16px]" style={{ filter: 'brightness(0) invert(1)' }} />
                {copied ? "Copied!" : "Copy Text"}
             </button>

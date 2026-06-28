@@ -88,7 +88,7 @@ export default function GoogleOneTap({ clientId }: GoogleOneTapProps) {
         window.google.accounts.id.initialize({
           client_id: clientId,
           callback: handleCredentialResponse,
-          auto_select: false,
+          auto_select: true,
           cancel_on_tap_outside: true,
           use_fedcm_for_prompt: true,
         });

@@ -54,17 +54,17 @@ export default function ResourceMiniPanel({
 
   return (
     <div
-      className="flex flex-col shrink-0"
+      className="flex shrink-0 flex-row sm:flex-col items-center justify-center sm:justify-start w-full sm:w-[87px] h-[87px] sm:h-auto sm:max-h-[min(70dvh,430px)]"
       style={{
-        width: 87,
+        maxWidth: "min(calc(100vw - 90px), 430px)",
         background: "var(--color-surface)",
         border: "1px solid var(--color-surface-border)",
         borderRadius: 26,
       }}
     >
-      <div className="flex flex-col pt-4 pb-6" style={{ width: 86 }}>
+      <div className="flex flex-row sm:flex-col pt-0 pb-0 sm:pt-4 sm:pb-6 px-4 sm:px-0 h-[87px] sm:h-auto items-center w-full sm:w-[86px]">
         {/* ── Add Button ── */}
-        <div className="flex flex-col gap-2.5 items-center">
+        <div className="flex flex-row sm:flex-col gap-2.5 items-center w-full sm:w-auto">
           <button
             type="button"
             onClick={onAddPage}
@@ -91,10 +91,9 @@ export default function ResourceMiniPanel({
 
           {/* ── Page Thumbnails ── */}
           <div 
-            className="flex flex-col gap-2.5 items-center overflow-y-auto py-3 -my-3"
+            className="flex flex-row sm:flex-col gap-2.5 items-center overflow-x-auto sm:overflow-x-visible overflow-y-visible sm:overflow-y-auto px-3 sm:px-0 py-0 sm:py-3 mx-0 sm:-my-3 w-full sm:w-auto h-full sm:h-auto"
             style={{ 
-              maxHeight: 315 + 24, // 5 items * 55px + 4 * 10px gap + 24px padding
-              width: "100%",
+              maxHeight: "none",
               scrollbarWidth: "none", // Firefox
               msOverflowStyle: "none", // IE/Edge
             }}
@@ -102,6 +101,11 @@ export default function ResourceMiniPanel({
             <style jsx>{`
               div::-webkit-scrollbar {
                 display: none;
+              }
+              @media (min-width: 640px) {
+                div {
+                  max-height: 339px !important;
+                }
               }
             `}</style>
             {pages.map((page) => {
@@ -114,13 +118,12 @@ export default function ResourceMiniPanel({
                     width: 77,
                     height: 77,
                     flexShrink: 0,
-                    marginTop: -6,
-                    marginBottom: -6,
                   }}
                 >
-                  <div
+                  <button
+                    type="button"
                     onClick={() => onPageSelect(page.id)}
-                    className="hover:shadow-lg"
+                    className="border-none hover:shadow-lg focus-visible:ring-2 focus-visible:ring-white"
                     style={{
                       width: 55,
                       height: 55,
@@ -132,6 +135,7 @@ export default function ResourceMiniPanel({
                       cursor: "pointer",
                     }}
                     title={page.name}
+                    aria-label={`Open ${page.name}`}
                   />
                   {onDeletePage && !readOnly && (
                     <button
@@ -140,7 +144,7 @@ export default function ResourceMiniPanel({
                         e.stopPropagation();
                         onDeletePage(page.id);
                       }}
-                      className="absolute bg-red-500 hover:bg-red-600 rounded-full opacity-0 group-hover:opacity-100 transition-all duration-200 shadow-[0_2px_8px_rgba(0,0,0,0.5)] flex items-center justify-center border-none cursor-pointer hover:scale-110"
+                      className="absolute flex cursor-pointer items-center justify-center rounded-full border-none bg-red-500 opacity-100 shadow-[0_2px_8px_rgba(0,0,0,0.5)] transition-all duration-200 hover:scale-110 hover:bg-red-600 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                       style={{ width: 22, height: 22, top: 0, right: 0, zIndex: 10 }}
                       aria-label="Delete Page"
                       title="Delete Page"

@@ -263,7 +263,12 @@ export default function DashboardPage() {
   const [visibility, setVisibility] = useState<Visibility>(initialDashboardState.visibility);
   const [selectedDate, setSelectedDate] = useState<string | null>(initialWorkspaceSnapshot.selectedDate);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set(initialWorkspaceSnapshot.expandedDates));
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window !== "undefined") {
+      return window.innerWidth < 768;
+    }
+    return false;
+  });
   const [isCanvasMode, setIsCanvasMode] = useState(initialWorkspaceSnapshot.isCanvasMode);
   const [activeCategory, setActiveCategory] = useState<Category>(initialWorkspaceSnapshot.activeCategory);
 
@@ -997,7 +1002,7 @@ export default function DashboardPage() {
 
       {/* ── Main Content Area ── */}
       <main
-        className="flex-1 relative flex flex-col h-screen overflow-hidden"
+        className="relative flex h-dvh flex-1 flex-col overflow-hidden"
         style={{ background: "var(--color-app-bg)" }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
@@ -1009,7 +1014,7 @@ export default function DashboardPage() {
       >
         <div className="relative flex-1 flex flex-col overflow-hidden bg-black">
           {/* ── Private/Public Toggle (top center) ── */}
-          <div className="absolute top-0 left-0 w-full flex justify-center pt-8 z-10 pointer-events-none">
+          <div className="pointer-events-none absolute left-0 top-0 z-10 flex w-full justify-center px-20 pt-4 sm:pt-8">
             <div className="pointer-events-auto">
               <VisibilityToggle
                 visibility={visibility}
@@ -1019,7 +1024,7 @@ export default function DashboardPage() {
           </div>
 
           {/* ── Category Switch (top right) ── */}
-          <div className="absolute top-8 right-8 z-10 pointer-events-auto">
+          <div className="absolute right-4 top-16 z-10 pointer-events-auto sm:right-8 sm:top-8">
             <CategorySwitch activeCategory={activeCategory} onChange={setActiveCategory} />
           </div>
 
@@ -1057,16 +1062,8 @@ export default function DashboardPage() {
           </div>
         </InfiniteCanvas>
 
-        {/* ── Right Navigation (Floating on right edge) ── */}
-        <div
-          className="absolute"
-          style={{
-            right: 66,
-            top: "50%",
-            transform: "translateY(-50%)",
-            zIndex: 10,
-          }}
-        >
+        {/* ── Bottom/Right Navigation (Floating) ── */}
+        <div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 sm:bottom-auto sm:left-auto sm:top-1/2 sm:-translate-x-0 sm:-translate-y-1/2 right-auto sm:right-[66px]">
           <ResourceMiniPanel
             pages={pages}
             activePageId={activePageId}
@@ -1077,10 +1074,7 @@ export default function DashboardPage() {
         </div>
 
         {/* ── Minimizer Button ── */}
-        <div
-          className="absolute"
-          style={{ right: 24, bottom: 24, zIndex: 10 }}
-        >
+        <div className="absolute bottom-4 right-4 z-10 sm:bottom-6 sm:right-6">
           <FloatingActionButton 
             onClick={handleFabClick} 
             onPaste={handlePaste}
@@ -1092,11 +1086,11 @@ export default function DashboardPage() {
       </main>
 
       {/* ── Global Toaster ── */}
-      <div className="fixed bottom-8 right-8 z-50 flex flex-col gap-3 pointer-events-none">
+      <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-50 flex flex-col items-end gap-3 sm:bottom-8 sm:left-auto sm:right-8">
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className="pointer-events-auto px-5 py-3.5 rounded-xl shadow-[0_8px_30px_rgba(0,0,0,0.3)] flex items-center gap-3"
+            className="pointer-events-auto flex w-full items-center gap-3 rounded-xl px-4 py-3.5 shadow-[0_8px_30px_rgba(0,0,0,0.3)] sm:w-auto sm:px-5"
             style={{
               maxWidth: "min(420px, calc(100vw - 32px))",
               background:
@@ -1167,8 +1161,7 @@ export default function DashboardPage() {
           <div 
             className="relative bg-[var(--color-surface)] border border-[var(--color-surface-border)] rounded-2xl shadow-2xl p-6 flex flex-col gap-4"
             style={{ 
-              width: 420, 
-              maxWidth: '90vw',
+              width: "min(420px, calc(100vw - 32px))",
               animation: "modal-zoom-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards"
             }}
           >

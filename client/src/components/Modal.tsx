@@ -35,7 +35,7 @@ export default function Modal({
           to { opacity: 1; transform: scale(1); }
         }
       `}</style>
-      <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-auto">
+      <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 pointer-events-auto">
         {/* Backdrop */}
         <div
           className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -46,8 +46,7 @@ export default function Modal({
         <div
           className="relative bg-[var(--color-surface)] border border-[var(--color-surface-border)] rounded-2xl shadow-2xl p-6 flex flex-col gap-4"
           style={{
-            width: 420,
-            maxWidth: "90vw",
+            width: "min(420px, calc(100vw - 32px))",
             animation:
               "modal-zoom-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards",
           }}
@@ -64,7 +63,7 @@ export default function Modal({
           >
             {message}
           </p>
-          <div className="flex justify-end gap-3 mt-4">
+          <div className="mt-4 flex flex-wrap justify-end gap-3">
             <button
               type="button"
               onClick={onClose}

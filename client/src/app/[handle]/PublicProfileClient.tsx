@@ -253,7 +253,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
 
   if (error || !user) {
     return (
-      <div className="w-screen h-screen flex items-center justify-center bg-[#191818] text-white">
+      <div className="flex h-dvh w-full items-center justify-center bg-[#191818] px-4 text-center text-white">
         <h2 className="text-xl">{error || "User not found"}</h2>
       </div>
     );
@@ -266,7 +266,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
     : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true);
 
   return (
-    <div className="flex h-screen overflow-hidden w-full text-[#F8F8F8]">
+    <div className="flex h-dvh w-full overflow-hidden text-[#F8F8F8]">
       <DashboardSidebar
         user={user}
         dateGroups={dateGroups}
@@ -285,12 +285,12 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
       />
 
       <main
-        className="flex-1 relative flex flex-col h-screen overflow-hidden"
+        className="relative flex h-dvh flex-1 flex-col overflow-hidden"
         style={{ background: "var(--color-app-bg)" }}
       >
         <div className="relative flex-1 flex flex-col overflow-hidden bg-black">
           {/* Top Right Controls (Category Switch) */}
-          <div className="absolute top-8 right-8 z-40 flex items-center gap-3 pointer-events-auto">
+          <div className="absolute right-4 top-4 z-40 flex items-center gap-3 pointer-events-auto sm:right-8 sm:top-8">
             <CategorySwitch activeCategory={activeCategory} onChange={setActiveCategory} />
           </div>
 
@@ -323,10 +323,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
           </InfiniteCanvas>
 
           {/* ── Minimizer Button (Bottom Right) ── */}
-          <div
-            className="absolute pointer-events-auto"
-            style={{ right: 24, bottom: 24, zIndex: 10 }}
-          >
+          <div className="absolute bottom-4 right-4 z-10 pointer-events-auto sm:bottom-6 sm:right-6">
             <FloatingActionButton 
               onClick={() => setIsCanvasMode(!isCanvasMode)} 
               isActive={isCanvasMode} 

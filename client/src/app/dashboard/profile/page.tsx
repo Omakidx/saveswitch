@@ -197,10 +197,10 @@ export default function ProfilePage() {
         cancelText="OK"
         onClose={() => setModalState({ ...modalState, isOpen: false })}
       />
-      <div className="flex h-screen w-full items-center justify-center bg-black font-arimo relative overflow-hidden">
+      <div className="relative flex min-h-dvh w-full items-center justify-center overflow-y-auto bg-black px-4 py-8 font-arimo">
 
 
-      <div className="relative z-10 w-full max-w-2xl px-8">
+      <div className="relative z-10 w-full max-w-2xl px-0 sm:px-8">
         <button
           onClick={() => router.push("/dashboard")}
           className="mb-6 flex items-center gap-2 text-white/60 hover:text-white transition-colors duration-200 border-none bg-transparent cursor-pointer group"
@@ -221,11 +221,20 @@ export default function ProfilePage() {
             Update your display name and profile picture.
           </p>
 
-          <form onSubmit={handleSave} className="flex flex-row items-start gap-12 w-full mt-4">
+          <form onSubmit={handleSave} className="mt-4 flex w-full flex-col items-center gap-8 sm:flex-row sm:items-start sm:gap-12">
             <div className="flex-shrink-0">
               <div
                 className="relative group cursor-pointer"
+                role="button"
+                tabIndex={0}
+                aria-label="Change profile picture"
                 onClick={() => fileInputRef.current?.click()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    fileInputRef.current?.click();
+                  }
+                }}
               >
                 <div className="w-32 h-32 rounded-full overflow-hidden border-2 border-white/10 relative transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
                   {picture ? (
@@ -255,6 +264,7 @@ export default function ProfilePage() {
                   />
                 </div>
                 <input
+                  id="profile-picture"
                   type="file"
                   ref={fileInputRef}
                   onChange={handleFileChange}
@@ -264,10 +274,11 @@ export default function ProfilePage() {
               </div>
             </div>
 
-            <div className="flex flex-col gap-6 flex-1">
+            <div className="flex w-full min-w-0 flex-1 flex-col gap-6">
               <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium text-white/70 ml-2">Display Name</label>
+                <label htmlFor="display-name" className="text-xs font-medium text-white/70 ml-2">Display Name</label>
                 <input
+                  id="display-name"
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -278,9 +289,10 @@ export default function ProfilePage() {
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium text-white/70 ml-2">Username</label>
+                <label htmlFor="username" className="text-xs font-medium text-white/70 ml-2">Username</label>
                 <div className="relative">
                   <input
+                    id="username"
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
@@ -297,6 +309,8 @@ export default function ProfilePage() {
                     minLength={3}
                     maxLength={20}
                     required
+                    aria-invalid={usernameStatus === "taken" || usernameStatus === "invalid"}
+                    aria-describedby={usernameMessage ? "username-status" : undefined}
                   />
                   {usernameStatus === "checking" && (
                     <div className="absolute right-3 top-1/2 -translate-y-1/2">
@@ -318,6 +332,7 @@ export default function ProfilePage() {
                 </div>
                 {usernameMessage && (
                   <span
+                    id="username-status"
                     className={`text-xs ml-2 mt-1 ${
                       usernameStatus === "invalid" || usernameStatus === "taken"
                         ? "text-red-400"
@@ -332,8 +347,9 @@ export default function ProfilePage() {
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-medium text-white/70 ml-2">Email Address</label>
+                <label htmlFor="email-address" className="text-xs font-medium text-white/70 ml-2">Email Address</label>
                 <input
+                  id="email-address"
                   type="text"
                   value={user?.email || ""}
                   disabled
@@ -345,7 +361,7 @@ export default function ProfilePage() {
                 <button
                   type="submit"
                   disabled={!hasChanges || saving || usernameStatus === "taken" || usernameStatus === "invalid" || usernameStatus === "checking"}
-                  className={`rounded-full border font-medium px-6 py-2 text-sm inline-flex items-center justify-center gap-2 transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                  className={`inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full border px-6 py-2 text-sm font-medium transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed sm:w-auto ${
                     hasChanges
                       ? "bg-white text-black border-transparent hover:bg-white/90 active:scale-[0.98]"
                       : "bg-white/10 backdrop-blur-md border-white/20 text-white"

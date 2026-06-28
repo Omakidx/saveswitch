@@ -15,21 +15,23 @@ export default function ResourceNavigator({ resources, onSelectResource, isActiv
   if (!isActive) return null;
 
   return (
-    <div className="absolute bottom-8 left-8 z-50 pointer-events-auto">
+    <div className="absolute bottom-20 left-4 z-50 pointer-events-auto sm:bottom-8 sm:left-8">
       <div className="relative">
         <button 
           onClick={() => setIsOpen(!isOpen)}
-          className="bg-[#1D1D1D] hover:bg-[#2A2A2A] text-white px-4 py-2.5 rounded-[20px] flex items-center gap-3 shadow-[0_8px_32px_rgba(0,0,0,0.4)] border border-white/10 transition-colors"
+          className="flex rounded-[20px] border border-white/10 bg-[#1D1D1D] px-3 py-2.5 text-white shadow-[0_8px_32px_rgba(0,0,0,0.4)] transition-colors hover:bg-[#2A2A2A] sm:items-center sm:gap-3 sm:px-4"
           title="Jump to Resource"
+          aria-expanded={isOpen}
+          aria-label="Jump to resource"
         >
           <img src="/icons/icon-resources.svg" alt="Resources" className="w-[18px] h-[18px]" style={{ filter: 'brightness(0) invert(1)' }} />
-          <span className="font-bold text-[13px] tracking-wide">Resources</span>
+          <span className="hidden font-bold text-[13px] tracking-wide sm:inline">Resources</span>
           <span className="bg-white/20 px-2 py-0.5 rounded-full text-[10px] font-bold">{resources.length}</span>
         </button>
 
         {isOpen && (
-          <div className="absolute bottom-full left-0 mb-3 w-64 bg-[#1D1D1D] rounded-[20px] shadow-[0_8px_32px_rgba(0,0,0,0.4)] border border-white/10 overflow-hidden z-50 animate-fade-in">
-            <div className="p-2 max-h-[400px] overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full custom-scrollbar">
+          <div className="absolute bottom-full left-0 z-50 mb-3 w-[min(16rem,calc(100vw-32px))] overflow-hidden rounded-[20px] border border-white/10 bg-[#1D1D1D] shadow-[0_8px_32px_rgba(0,0,0,0.4)] animate-fade-in">
+            <div className="max-h-[min(400px,60dvh)] overflow-y-auto p-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black [&::-webkit-scrollbar-thumb]:rounded-full custom-scrollbar">
             {resources.length === 0 ? (
               <div className="text-white/50 text-xs text-center py-6 font-medium">No resources on this page</div>
             ) : (
