@@ -237,6 +237,11 @@ function getApiErrorMessage(error: unknown, fallback: string): string {
   return sanitizeErrorToast(error.trim());
 }
 
+function shouldAutoEnterCanvasAfterCreate(): boolean {
+  if (typeof window === "undefined") return true;
+  return !window.matchMedia("(max-width: 639px)").matches;
+}
+
 /* ── Dashboard Page ── */
 export default function DashboardPage() {
   const [initialDashboardState] = useState(readDashboardState);
@@ -593,7 +598,9 @@ export default function DashboardPage() {
           setActivePageId(newPage.id);
           setSelectedDate(todayPrefix);
           localStorage.setItem(`saveswitch-active-page-${visibility}`, newPage.id);
-          setIsCanvasMode(true);
+          if (shouldAutoEnterCanvasAfterCreate()) {
+            setIsCanvasMode(true);
+          }
           setExpandedDates((prev) => new Set(prev).add(todayPrefix));
         } else {
           showToast(`Failed to add page: ${data.error || 'Unknown error'}`, 'error');

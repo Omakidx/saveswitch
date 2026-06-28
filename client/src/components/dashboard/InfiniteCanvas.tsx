@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
+import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
 
 export interface InfiniteCanvasRef {
   panTo: (x: number, y: number) => void;
@@ -20,6 +20,24 @@ interface InfiniteCanvasProps {
   canvasOffsetRef?: React.MutableRefObject<{ x: number, y: number }>;
 }
 
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 3;
+
+function clampZoom(value: number) {
+  return Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
+}
+
+function getPointerDistance(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function getPointerMidpoint(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
 const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   children,
   isActive,
@@ -30,17 +48,73 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   const [zoom, setZoom] = useState(1);
   const [isDragging, setIsDragging] = useState(false);
   const [isAnimatingToTarget, setIsAnimatingToTarget] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
   const startPos = useRef({ x: 0, y: 0 });
   const animationTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const offsetRef = useRef(offset);
+  const zoomRef = useRef(zoom);
+  const activePointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const dragPointerIdRef = useRef<number | null>(null);
+  const pinchStartRef = useRef<{
+    distance: number;
+    midpoint: { x: number; y: number };
+    offset: { x: number; y: number };
+    zoom: number;
+  } | null>(null);
+
+  const updateView = useCallback((nextOffset: { x: number; y: number }, nextZoom = zoomRef.current) => {
+    offsetRef.current = nextOffset;
+    zoomRef.current = nextZoom;
+    setOffset(nextOffset);
+    setZoom(nextZoom);
+    if (canvasOffsetRef) canvasOffsetRef.current = nextOffset;
+  }, [canvasOffsetRef]);
+
+  const getViewportCenter = () => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    }
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  };
+
+  const beginPinchGesture = () => {
+    const pointers = Array.from(activePointersRef.current.values());
+    if (pointers.length < 2) {
+      pinchStartRef.current = null;
+      return;
+    }
+
+    const [first, second] = pointers;
+    pinchStartRef.current = {
+      distance: Math.max(getPointerDistance(first, second), 1),
+      midpoint: getPointerMidpoint(first, second),
+      offset: { ...offsetRef.current },
+      zoom: zoomRef.current,
+    };
+  };
 
   // Reset offset when toggling canvas mode off
   useEffect(() => {
     if (!isActive) {
-      setOffset({ x: 0, y: 0 });
-      setZoom(1);
-      if (canvasOffsetRef) canvasOffsetRef.current = { x: 0, y: 0 };
+      activePointersRef.current.clear();
+      dragPointerIdRef.current = null;
+      pinchStartRef.current = null;
+      setIsDragging(false);
+      updateView({ x: 0, y: 0 }, 1);
     }
-  }, [isActive, canvasOffsetRef]);
+  }, [isActive, updateView]);
+
+  useEffect(() => {
+    offsetRef.current = offset;
+  }, [offset]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
 
   useImperativeHandle(ref, () => ({
     panTo: (x: number, y: number) => {
@@ -53,69 +127,124 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
         x: window.innerWidth / 2 - (x + 150),
         y: window.innerHeight / 2 - (y + 100),
       };
-      setOffset(targetOffset);
-      setZoom(1); // Optional: reset zoom to 1 when panning to a specific resource
-      if (canvasOffsetRef) canvasOffsetRef.current = targetOffset;
+      updateView(targetOffset, 1);
 
       animationTimeout.current = setTimeout(() => {
         setIsAnimatingToTarget(false);
       }, 800); // 800ms matches the transition duration
     },
-    getViewState: () => ({ offset, zoom }),
+    getViewState: () => ({ offset: offsetRef.current, zoom: zoomRef.current }),
     setViewState: (state: CanvasViewState) => {
-      setOffset(state.offset);
-      setZoom(state.zoom);
-      if (canvasOffsetRef) canvasOffsetRef.current = state.offset;
+      updateView(state.offset, clampZoom(state.zoom));
     },
   }));
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (!isActive) return;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    if (activePointersRef.current.size >= 2) {
+      dragPointerIdRef.current = null;
+      setIsDragging(false);
+      beginPinchGesture();
+      return;
+    }
+
+    dragPointerIdRef.current = e.pointerId;
     setIsDragging(true);
-    startPos.current = { x: e.clientX - offset.x, y: e.clientY - offset.y };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    startPos.current = { x: e.clientX - offsetRef.current.x, y: e.clientY - offsetRef.current.y };
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (!isDragging || !isActive) return;
+    if (!isActive || !activePointersRef.current.has(e.pointerId)) return;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointersRef.current.size >= 2) {
+      if (!pinchStartRef.current) beginPinchGesture();
+      const pinchStart = pinchStartRef.current;
+      if (!pinchStart) return;
+
+      const pointers = Array.from(activePointersRef.current.values());
+      const [first, second] = pointers;
+      const midpoint = getPointerMidpoint(first, second);
+      const distance = Math.max(getPointerDistance(first, second), 1);
+      const nextZoom = clampZoom(pinchStart.zoom * (distance / pinchStart.distance));
+      const viewportCenter = getViewportCenter();
+      const contentPoint = {
+        x: (pinchStart.midpoint.x - viewportCenter.x - pinchStart.offset.x) / pinchStart.zoom,
+        y: (pinchStart.midpoint.y - viewportCenter.y - pinchStart.offset.y) / pinchStart.zoom,
+      };
+      const nextOffset = {
+        x: midpoint.x - viewportCenter.x - contentPoint.x * nextZoom,
+        y: midpoint.y - viewportCenter.y - contentPoint.y * nextZoom,
+      };
+      updateView(nextOffset, nextZoom);
+      return;
+    }
+
+    if (!isDragging || dragPointerIdRef.current !== e.pointerId) return;
     const newOffset = {
       x: e.clientX - startPos.current.x,
       y: e.clientY - startPos.current.y,
     };
-    setOffset(newOffset);
-    if (canvasOffsetRef) canvasOffsetRef.current = newOffset;
+    updateView(newOffset);
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
     if (!isActive) return;
+    activePointersRef.current.delete(e.pointerId);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+
+    if (activePointersRef.current.size >= 2) {
+      beginPinchGesture();
+      return;
+    }
+
+    pinchStartRef.current = null;
+
+    const remainingPointer = Array.from(activePointersRef.current.entries())[0];
+    if (remainingPointer) {
+      const [pointerId, pointer] = remainingPointer;
+      dragPointerIdRef.current = pointerId;
+      startPos.current = { x: pointer.x - offsetRef.current.x, y: pointer.y - offsetRef.current.y };
+      setIsDragging(true);
+      return;
+    }
+
+    dragPointerIdRef.current = null;
     setIsDragging(false);
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
   };
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!isActive) return;
+    e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
       // Zoom
       const delta = e.deltaY * -0.002;
-      setZoom((z) => Math.min(Math.max(z + delta, 0.2), 3));
+      updateView(offsetRef.current, clampZoom(zoomRef.current + delta));
     } else {
       // Pan
       const newOffset = {
-        x: offset.x - e.deltaX,
-        y: offset.y - e.deltaY,
+        x: offsetRef.current.x - e.deltaX,
+        y: offsetRef.current.y - e.deltaY,
       };
-      setOffset(newOffset);
-      if (canvasOffsetRef) canvasOffsetRef.current = newOffset;
+      updateView(newOffset);
     }
   };
 
   return (
     <div
+      ref={containerRef}
       className={`absolute inset-0 overflow-hidden transition-colors duration-500 ease-out ${
         isActive ? "cursor-grab active:cursor-grabbing" : ""
       }`}
       style={{
         zIndex: 0,
+        touchAction: isActive ? "none" : "auto",
+        overscrollBehavior: isActive ? "none" : "auto",
         backgroundColor: isActive ? canvasColor : "transparent",
         backgroundImage: isActive ? "radial-gradient(circle, rgba(0, 0, 0, 0.15) 1.5px, transparent 1.5px)" : "none",
         backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
@@ -156,7 +285,7 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
           <button 
             type="button"
             className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
-            onClick={() => setZoom(z => Math.max(z - 0.1, 0.2))}
+            onClick={() => updateView(offsetRef.current, clampZoom(zoomRef.current - 0.1))}
             title="Zoom Out"
             aria-label="Zoom out"
           >
@@ -168,7 +297,7 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
           <button 
             type="button"
             className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
-            onClick={() => setZoom(z => Math.min(z + 0.1, 3))}
+            onClick={() => updateView(offsetRef.current, clampZoom(zoomRef.current + 0.1))}
             title="Zoom In"
             aria-label="Zoom in"
           >
