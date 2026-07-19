@@ -24,6 +24,7 @@
     "cloudinary": "^2.10.0",
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.4.29",
+    "postgres": "^3.4.9",
     "socket.io": "^4.8.3"
   }
 }
