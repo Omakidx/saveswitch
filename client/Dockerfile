@@ -5,7 +5,10 @@ WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
-FROM dependencies AS production-dependencies
+FROM oven/bun:1.3.14 AS production-dependencies
+
+WORKDIR /app
+COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 FROM node:22-bookworm-slim AS builder

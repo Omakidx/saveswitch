@@ -6,4 +6,4 @@ build:
     NEXT_PUBLIC_API_URL: https://api.saveswitch.xyz
 
 run:
-  web: bun --bun next start -p ${PORT:-5173}
+  web: node node_modules/next/dist/bin/next start -p ${PORT:-5173}
