@@ -1,4 +1,4 @@
-FROM oven/bun:1 AS dependencies
+FROM oven/bun:1.3.14 AS dependencies
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ ENV NODE_ENV=production
 COPY . .
 RUN bun run build
 
-FROM oven/bun:1 AS runtime
+FROM oven/bun:1.3.14 AS runtime
 
 WORKDIR /app
 
