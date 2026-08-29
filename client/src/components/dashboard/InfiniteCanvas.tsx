@@ -1,6 +1,15 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
+import {
+  CANVAS_ZOOM_STEP,
+  getCanvasZoomShortcut,
+  getHorizontalSwipeNavigation,
+  HORIZONTAL_SWIPE_COOLDOWN_MS,
+  HORIZONTAL_SWIPE_WINDOW_MS,
+  isCanvasEditableTarget,
+  type CanvasPageNavigationDirection,
+} from "./canvasInteractions";
 
 export interface InfiniteCanvasRef {
   panTo: (x: number, y: number) => void;
@@ -18,6 +27,8 @@ interface InfiniteCanvasProps {
   isActive: boolean;
   canvasColor?: string;
   canvasOffsetRef?: React.MutableRefObject<{ x: number, y: number }>;
+  onNavigatePage?: (direction: CanvasPageNavigationDirection) => void;
+  isResourceDragging?: boolean;
 }
 
 const MIN_ZOOM = 0.2;
@@ -43,6 +54,8 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   isActive,
   canvasColor = "var(--color-app-bg)",
   canvasOffsetRef,
+  onNavigatePage,
+  isResourceDragging = false,
 }, ref) => {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
@@ -61,6 +74,9 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
     offset: { x: number; y: number };
     zoom: number;
   } | null>(null);
+
+  const wheelGestureRef = useRef({ x: 0, y: 0, startedAt: 0 });
+  const wheelNavigationCooldownRef = useRef(0);
 
   const updateView = useCallback((nextOffset: { x: number; y: number }, nextZoom = zoomRef.current) => {
     offsetRef.current = nextOffset;
@@ -115,6 +131,25 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   useEffect(() => {
     zoomRef.current = zoom;
   }, [zoom]);
+
+  useEffect(() => {
+    if (!isActive) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isCanvasEditableTarget(event.target)) return;
+      const shortcut = getCanvasZoomShortcut(event);
+      if (!shortcut) return;
+
+      event.preventDefault();
+      updateView(
+        offsetRef.current,
+        clampZoom(zoomRef.current + (shortcut === "in" ? CANVAS_ZOOM_STEP : -CANVAS_ZOOM_STEP)),
+      );
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isActive, updateView]);
 
   useImperativeHandle(ref, () => ({
     panTo: (x: number, y: number) => {
@@ -219,13 +254,39 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   };
 
   const handleWheel = (e: React.WheelEvent) => {
-    if (!isActive) return;
+    if (!isActive || isCanvasEditableTarget(e.target)) return;
     e.preventDefault();
+    if (isResourceDragging) return;
     if (e.ctrlKey || e.metaKey) {
+      wheelGestureRef.current = { x: 0, y: 0, startedAt: 0 };
       // Zoom
       const delta = e.deltaY * -0.002;
       updateView(offsetRef.current, clampZoom(zoomRef.current + delta));
     } else {
+      const now = performance.now();
+      const gesture = wheelGestureRef.current;
+      if (now - gesture.startedAt > HORIZONTAL_SWIPE_WINDOW_MS) {
+        gesture.x = 0;
+        gesture.y = 0;
+        gesture.startedAt = now;
+      }
+      gesture.x += e.deltaX;
+      gesture.y += e.deltaY;
+
+      const navigationDirection = getHorizontalSwipeNavigation(
+        gesture.x,
+        gesture.y,
+        now - gesture.startedAt,
+      );
+      if (navigationDirection && onNavigatePage && now >= wheelNavigationCooldownRef.current) {
+        wheelNavigationCooldownRef.current = now + HORIZONTAL_SWIPE_COOLDOWN_MS;
+        gesture.x = 0;
+        gesture.y = 0;
+        gesture.startedAt = now;
+        onNavigatePage(navigationDirection);
+        return;
+      }
+
       // Pan
       const newOffset = {
         x: offsetRef.current.x - e.deltaX,
@@ -238,9 +299,7 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
   return (
     <div
       ref={containerRef}
-      className={`absolute inset-0 overflow-hidden transition-colors duration-500 ease-out ${
-        isActive ? "cursor-grab active:cursor-grabbing" : ""
-      }`}
+      className="absolute inset-0 overflow-hidden transition-colors duration-500 ease-out"
       style={{
         zIndex: 0,
         touchAction: isActive ? "none" : "auto",
@@ -249,6 +308,7 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
         backgroundImage: isActive ? "radial-gradient(circle, rgba(0, 0, 0, 0.15) 1.5px, transparent 1.5px)" : "none",
         backgroundSize: `${24 * zoom}px ${24 * zoom}px`,
         backgroundPosition: `calc(50% + ${offset.x}px) calc(50% + ${offset.y}px)`,
+        cursor: isActive ? 'url("/icons/cursor-palm.svg") 12 12, move' : undefined,
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -277,31 +337,38 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
 
       {/* ── Zoom Controls ── */}
       {isActive && (
-        <div 
-          className="absolute bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[20px] border border-white/10 bg-[#1D1D1D] px-2 py-1 shadow-[0_8px_32px_rgba(0,0,0,0.4)] sm:bottom-8 sm:gap-3"
+        <div
+          className="absolute bottom-5 right-5 z-50 flex h-9 items-center gap-0.5 rounded-full border border-white/55 bg-white/[0.28] px-1.5 text-[#2b2b28] shadow-[0_6px_18px_rgba(68,63,42,0.11)] backdrop-blur-2xl"
           onPointerDown={(e) => e.stopPropagation()}
           onWheel={(e) => e.stopPropagation()}
         >
-          <button 
+          <button
             type="button"
-            className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
-            onClick={() => updateView(offsetRef.current, clampZoom(zoomRef.current - 0.1))}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/45 bg-white/[0.16] text-[#33332f] transition-colors hover:bg-white/[0.48] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]"
+            onClick={() => updateView(offsetRef.current, clampZoom(zoomRef.current - CANVAS_ZOOM_STEP))}
             title="Zoom Out"
             aria-label="Zoom out"
           >
-            -
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+              <path d="M6 12h12" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+            </svg>
           </button>
-          <span className="text-white font-medium min-w-[3.5rem] text-center text-[13px]">
+          <span
+            className="inline-grid h-7 min-w-9 place-items-center whitespace-nowrap px-0.5 text-center text-[10px] font-medium leading-none tabular-nums text-[#34342f]"
+            aria-label={`Zoom level ${Math.round(zoom * 100)} percent`}
+          >
             {Math.round(zoom * 100)}%
           </span>
-          <button 
+          <button
             type="button"
-            className="w-8 h-8 rounded-full hover:bg-white/10 text-white flex items-center justify-center font-bold text-lg cursor-pointer"
-            onClick={() => updateView(offsetRef.current, clampZoom(zoomRef.current + 0.1))}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/45 bg-white/[0.16] text-[#33332f] transition-colors hover:bg-white/[0.48] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]"
+            onClick={() => updateView(offsetRef.current, clampZoom(zoomRef.current + CANVAS_ZOOM_STEP))}
             title="Zoom In"
             aria-label="Zoom in"
           >
-            +
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+              <path d="M12 6v12M6 12h12" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
       )}

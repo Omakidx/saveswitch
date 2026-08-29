@@ -2,6 +2,8 @@
 
 
 import ResourceCard, { Resource } from "./ResourceCard";
+import styles from "./CardStack.module.css";
+import { moveResource } from "./resourceSelection";
 
 import React, { useState, useRef, useEffect } from "react";
 import { motion } from 'framer-motion';
@@ -15,6 +17,9 @@ interface CardStackProps {
   resources?: Resource[];
   onDeleteResource?: (id: string) => void;
   onUpdateResourcePosition?: (id: string, x: number, y: number) => void;
+  onUpdateTextResource?: (id: string, content: string) => Promise<void>;
+  canManageResource?: (resource: Resource) => boolean;
+  onResourceDragStateChange?: (isDragging: boolean) => void;
   highlightedResourceId?: string | null;
   readOnly?: boolean;
 }
@@ -27,13 +32,13 @@ const CARD_SHADOWS = [
   "0px 8px 24px 0px rgba(0,0,0,0.1), 0px 1px 2px 0px rgba(0,0,0,0.06)",
 ];
 
-export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition, highlightedResourceId, readOnly = false }: CardStackProps) {
+export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition, onUpdateTextResource, canManageResource, onResourceDragStateChange, highlightedResourceId, readOnly = false }: CardStackProps) {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
   const isDraggingCard = useRef(false);
+  const dragCancelled = useRef(false);
   const dragTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const [winSize, setWinSize] = useState(() => {
     if (typeof window === "undefined") return { w: 1920, h: 1080 };
     return { w: window.innerWidth, h: window.innerHeight };
@@ -100,6 +105,40 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
     setDragOffset({ x: 0, y: 0 });
   };
 
+  const stopCardPointerPropagation = (event: React.PointerEvent<HTMLDivElement>) => {
+    // The canvas begins panning on pointer-down. Stop that event at the card so
+    // the same gesture cannot move both the card and its canvas.
+    event.stopPropagation();
+  };
+
+  const beginResourceDrag = () => {
+    dragCancelled.current = false;
+    isDraggingCard.current = true;
+    onResourceDragStateChange?.(true);
+    if (dragTimeout.current) clearTimeout(dragTimeout.current);
+  };
+
+  const finishResourceDragState = () => {
+    if (!isDraggingCard.current) return;
+
+    onResourceDragStateChange?.(false);
+    dragTimeout.current = setTimeout(() => {
+      isDraggingCard.current = false;
+    }, 100);
+  };
+
+  const finishResourceDrag = (resource: Resource, offset: { x: number; y: number }) => {
+    if (!dragCancelled.current && onUpdateResourcePosition) {
+      const position = moveResource(
+        { id: resource.id, x: resource.x ?? 100, y: resource.y ?? 100 },
+        offset,
+      );
+      onUpdateResourcePosition(position.id, position.x, position.y);
+    }
+
+    finishResourceDragState();
+  };
+
   // Calculate bounding box for all resources to scale them inside minimized card
   let contentScale = 1;
   let centerX = 0;
@@ -114,9 +153,9 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
       minY = Math.min(minY, y);
       // Rough estimates of card dimensions (approx 320x400 max)
       maxX = Math.max(maxX, x + 320);
-      maxY = Math.max(maxY, y + 400); 
+      maxY = Math.max(maxY, y + 400);
     });
-    
+
     // Add padding
     minX -= 100; minY -= 100;
     maxX += 100; maxY += 100;
@@ -157,7 +196,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
       >
         {visiblePages.map((page, index) => {
           const isTopCard = index === totalCards - 1;
-          
+
           // Original Figma stacking math
           const widthBase = 503.12;
           const heightBase = 282.72;
@@ -172,7 +211,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
 
           const cardWidth = widthBase + adjustedIndex * widthStep;
           const cardHeight = heightBase + adjustedIndex * heightStep;
-          const cardX = (4 - adjustedIndex) * xStep; 
+          const cardX = (4 - adjustedIndex) * xStep;
           const cardY = (4 - adjustedIndex) * (-yStep) + 52.13;
 
           const radiusBase = 6.08;
@@ -220,7 +259,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
               onPointerCancel={isTopCard ? handlePointerUp : undefined}
             >
               {isTopCard && (
-                <div 
+                <div
                   className={`relative ${isExpanded ? "w-full h-full pointer-events-auto" : "absolute left-1/2 top-1/2 pointer-events-none"}`}
                   style={isExpanded ? {} : {
                     width: 0,
@@ -229,48 +268,54 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
                     transformOrigin: "0 0"
                   }}
                 >
-                  {resources.length === 0 ? (
+                  {resources.length === 0 && readOnly ? (
                     <div className="w-full h-full flex items-center justify-center pointer-events-none">
                       <span className="text-white/40 font-arimo text-lg select-none">
-                        {readOnly ? "This page is empty." : "Use Ctrl+V or the + button to paste resources here."}
+                        This page is empty.
                       </span>
                     </div>
-                  ) : (
-                    resources.map(res => (
-                        <motion.div 
-                          key={res.id} 
-                          className={`absolute w-[min(300px,calc(100vw-48px))] max-w-[300px] flex-shrink-0 animate-fade-in transition-[box-shadow] duration-500 rounded-[12px] ${isExpanded ? 'pointer-events-auto cursor-grab active:cursor-grabbing' : 'pointer-events-none'} ${res.id === highlightedResourceId ? 'ring-4 ring-[#EAB308]/80 shadow-[0_0_30px_rgba(234,179,8,0.5)]' : ''}`}
+                  ) : resources.length > 0 ? (
+                    resources.map((res) => {
+                      const resourceReadOnly = readOnly || (canManageResource ? !canManageResource(res) : false);
+                      return (
+                        <motion.div
+                          key={res.id}
+                          data-resource-id={res.id}
+                          className={`absolute w-[min(300px,calc(100vw-48px))] max-w-[300px] flex-shrink-0 animate-fade-in transition-[box-shadow] duration-500 rounded-[12px] ${isExpanded ? 'pointer-events-auto cursor-grab active:cursor-grabbing' : 'pointer-events-none'} ${res.id === highlightedResourceId ? styles.focusedResource : ''}`}
                           style={{ zIndex: res.zIndex || 1 }}
                           initial={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
-                          animate={{ x: res.x ?? 100, y: res.y ?? 100, rotate: res.rotation ?? 0 }}
-                          drag={!readOnly}
-                        dragMomentum={false}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        onDragStart={() => {
-                          isDraggingCard.current = true;
-                          if (dragTimeout.current) clearTimeout(dragTimeout.current);
-                        }}
-                        onDragEnd={(_, info) => {
-                          const newX = (res.x ?? 100) + info.offset.x;
-                          const newY = (res.y ?? 100) + info.offset.y;
-                          if (onUpdateResourcePosition) {
-                            onUpdateResourcePosition(res.id, Math.round(newX), Math.round(newY));
-                          }
-                          dragTimeout.current = setTimeout(() => {
-                            isDraggingCard.current = false;
-                          }, 100);
-                        }}
-                        onClickCapture={(e) => {
-                          if (isDraggingCard.current) {
-                            e.stopPropagation();
-                            e.preventDefault();
-                          }
-                        }}
-                      >
-                        <ResourceCard resource={res} onDelete={onDeleteResource} readOnly={readOnly} />
-                      </motion.div>
-                    ))
-                  )}
+                          animate={{
+                            x: res.x ?? 100,
+                            y: res.y ?? 100,
+                            rotate: res.rotation ?? 0,
+                          }}
+                          drag={!resourceReadOnly}
+                          dragMomentum={false}
+                          onPointerDown={stopCardPointerPropagation}
+                          onPointerCancel={(event) => {
+                            event.stopPropagation();
+                            dragCancelled.current = true;
+                            finishResourceDragState();
+                          }}
+                          onDragStart={beginResourceDrag}
+                          onDragEnd={(_, info) => finishResourceDrag(res, info.offset)}
+                          onClickCapture={(event) => {
+                            if (isDraggingCard.current) {
+                              event.stopPropagation();
+                              event.preventDefault();
+                            }
+                          }}
+                        >
+                          <ResourceCard
+                            resource={res}
+                            onDelete={resourceReadOnly ? undefined : onDeleteResource}
+                            onUpdateText={resourceReadOnly ? undefined : onUpdateTextResource}
+                            readOnly={resourceReadOnly}
+                          />
+                        </motion.div>
+                      );
+                    })
+                  ) : null}
                 </div>
               )}
             </div>

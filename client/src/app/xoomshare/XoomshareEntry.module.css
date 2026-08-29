@@ -1,0 +1,47 @@
+.page {
+  min-height: 100dvh;
+  color: #393a32;
+  background-color: #fbf8dc;
+  background-image: radial-gradient(circle, rgba(77, 78, 62, 0.22) 1px, transparent 1.15px);
+  background-size: 24px 24px;
+}
+
+.back {
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: 0 6px 18px rgba(68, 63, 42, 0.1);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  background: rgba(255, 254, 245, 0.62);
+  box-shadow: 0 16px 38px rgba(68, 63, 42, 0.13);
+  backdrop-filter: blur(22px) saturate(112%);
+  -webkit-backdrop-filter: blur(22px) saturate(112%);
+}
+
+.input {
+  border-bottom: 1px solid rgba(64, 66, 55, 0.28);
+  color: #35362f;
+}
+
+.input:focus-within {
+  border-color: #176bff;
+}
+
+.submit {
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  background: rgba(88, 91, 78, 0.72);
+  color: white;
+  box-shadow: 0 6px 16px rgba(68, 63, 42, 0.14);
+}
+
+.submit:hover:not(:disabled) {
+  background: rgba(65, 68, 56, 0.84);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page * { transition-duration: 0.01ms !important; }
+}

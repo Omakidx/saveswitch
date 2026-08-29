@@ -2,16 +2,50 @@ import { Elysia } from 'elysia'
 import { cors } from '@elysiajs/cors'
 import { jwt } from '@elysiajs/jwt'
 import { db } from './db'
-import { users, pages, resources } from './db/schema'
-import { eq, and, inArray, isNotNull, lt } from 'drizzle-orm'
+import { assetDeletionQueue, users, pages, resources } from './db/schema'
+import { eq, and, inArray, isNotNull, lt, sql } from 'drizzle-orm'
 import {
   CloudinaryConfigurationError,
   ImageUploadError,
   ImageValidationError,
+  ResourceUploadError,
+  ResourceUploadValidationError,
+  cleanupUncommittedResourceAsset,
+  destroyUploadedResourceAsset,
+  getAssetDeletionQueueOutcome,
+  getResourceDataUrlByteLength,
   uploadImage,
-  uploadResource,
+  uploadResourceAsset,
+  type UploadedResourceAsset,
 } from './utils/cloudinary'
 import { fetchOpenGraphData } from './utils/opengraph'
+import { AUTH_TOKEN_MAX_AGE_SECONDS, createAuthTokenClaims } from './auth-token'
+import { isUuid } from './request-validation'
+import { resolveRuntimeConfig } from './runtime-config'
+import {
+  canCreateXoomshareResource,
+  canManageXoomshareResource,
+  createXoomshareCookie,
+  generateXoomsharePathCode,
+  normalizeXoomsharePathCode,
+  resolveXoomshareParticipant,
+  XoomsharePathCodeError,
+  xoomshareCookieName,
+} from './xoomshare-auth'
+import {
+  FixedWindowRateLimiter,
+  getXoomshareResourceStorageBytes,
+  isWithinUtf8ByteLimit,
+  SocketQueryBudget,
+  isXoomsharePageId,
+  truncateUtf8,
+  utf8ByteLength,
+  XOOMSHARE_MAX_DESCRIPTION_BYTES,
+  XOOMSHARE_MAX_PAGE_NAME_BYTES,
+  XOOMSHARE_MAX_RESOURCE_BYTES,
+  XOOMSHARE_MAX_RESOURCES,
+  XOOMSHARE_MAX_TITLE_BYTES,
+} from './xoomshare-security'
 
 // ── Types for Google API responses ──
 interface GoogleTokenResponse {
@@ -29,21 +63,6 @@ interface GoogleUserInfo {
   name: string
   picture: string
   verified_email?: boolean
-}
-
-interface GoogleTokenPayload {
-  iss: string
-  azp: string
-  aud: string
-  sub: string
-  email: string
-  email_verified: string
-  name: string
-  picture: string
-  given_name?: string
-  family_name?: string
-  iat: string
-  exp: string
 }
 
 type UserProfileUpdateBody = {
@@ -106,13 +125,45 @@ const getOptionalString = (value: unknown) => {
   return trimmedValue.length > 0 ? trimmedValue : null
 }
 
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ''
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || ''
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/google/callback'
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+const getBoundedXoomshareOptionalString = (value: unknown, fieldName: string, maxBytes: number) => {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') throw new ResourceValidationError(`${fieldName} must be text`)
+  const trimmedValue = value.trim()
+  if (!trimmedValue) return null
+  if (!isWithinUtf8ByteLimit(trimmedValue, maxBytes)) {
+    throw new ResourceValidationError(`${fieldName} must be ${maxBytes} bytes or fewer`)
+  }
+  return trimmedValue
+}
+
+const getBoundedXoomsharePageName = (value: unknown) =>
+  getBoundedXoomshareOptionalString(value, 'Page name', XOOMSHARE_MAX_PAGE_NAME_BYTES)
+
+const runtimeConfig = resolveRuntimeConfig()
+const GOOGLE_CLIENT_ID = runtimeConfig.googleClientId
+const GOOGLE_CLIENT_SECRET = runtimeConfig.googleClientSecret
+const GOOGLE_REDIRECT_URI = runtimeConfig.googleRedirectUri
+const CLIENT_ORIGIN = runtimeConfig.clientOrigin
+const isLocalDevelopmentOrigin = runtimeConfig.isLocalDevelopmentOrigin
+const AUTH_COOKIE_SECURE = runtimeConfig.isProduction
+const DEV_MODE =
+  process.env.NODE_ENV === 'development' &&
+  process.env.SAVESWITCH_DEV_MODE === 'true' &&
+  isLocalDevelopmentOrigin
+const MAX_REQUEST_BODY_BYTES = 15 * 1024 * 1024
+const DEV_USER = {
+  id: 'saveswitch-dev-user',
+  email: 'dev@saveswitch.local',
+  username: 'dev_user',
+  name: 'SaveSwitch Dev',
+  picture: '',
+  visibility: 'public' as const,
+}
 const XOOMSHARE_TTL_HOURS = 3
 const XOOMSHARE_TTL_MS = XOOMSHARE_TTL_HOURS * 60 * 60 * 1000
 const XOOMSHARE_CLEANUP_INTERVAL_MS = 60 * 1000
+const XOOMSHARE_COOKIE_SECURE = !isLocalDevelopmentOrigin
+const MAX_XOOMSHARE_TEXT_LENGTH = 100_000
 const RESERVED_PATH_CODES = new Set([
   'api',
   'auth',
@@ -128,37 +179,6 @@ type XoomshareCreateBody = {
   pathCode?: unknown
 }
 
-const generatePathCode = () => {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
-  let code = ''
-  for (let i = 0; i < 8; i++) {
-    code += alphabet[Math.floor(Math.random() * alphabet.length)]
-  }
-  return code
-}
-
-const normalizePathCode = (value: unknown) => {
-  if (value === undefined || value === null || value === '') return generatePathCode()
-  if (typeof value !== 'string') {
-    throw new ResourceValidationError('Secret page code must be text')
-  }
-
-  const pathCode = value.trim()
-  if (pathCode.length < 3 || pathCode.length > 48) {
-    throw new ResourceValidationError('Secret page code must be between 3 and 48 characters')
-  }
-
-  if (!/^[A-Za-z0-9_-]+$/.test(pathCode)) {
-    throw new ResourceValidationError('Use letters, numbers, hyphens, or underscores only')
-  }
-
-  if (RESERVED_PATH_CODES.has(pathCode.toLowerCase()) || pathCode.startsWith('@')) {
-    throw new ResourceValidationError('That secret page code is reserved')
-  }
-
-  return pathCode
-}
-
 const getEffectiveXoomshareExpiresAt = (page: typeof pages.$inferSelect) => {
   if (!page.sessionId && !page.expiresAt) return null
 
@@ -169,7 +189,12 @@ const getEffectiveXoomshareExpiresAt = (page: typeof pages.$inferSelect) => {
 }
 
 const formatPage = (page: typeof pages.$inferSelect) => {
-  const { sessionId: _sessionId, ...safePage } = page
+  const {
+    sessionId: _sessionId,
+    resourceCount: _resourceCount,
+    resourceBytes: _resourceBytes,
+    ...safePage
+  } = page
   const effectiveExpiresAt = getEffectiveXoomshareExpiresAt(page)
   return {
     ...safePage,
@@ -178,10 +203,19 @@ const formatPage = (page: typeof pages.$inferSelect) => {
   }
 }
 
-const formatResource = (resource: typeof resources.$inferSelect) => ({
-  ...resource,
-  created_at: resource.createdAt.toISOString(),
-})
+const formatResource = (resource: typeof resources.$inferSelect) => {
+  const {
+    sessionId: _sessionId,
+    sizeBytes: _sizeBytes,
+    providerPublicId: _providerPublicId,
+    providerResourceType: _providerResourceType,
+    ...safeResource
+  } = resource
+  return {
+    ...safeResource,
+    created_at: resource.createdAt.toISOString(),
+  }
+}
 
 const isExpired = (expiresAt: Date | null) => {
   return !!expiresAt && expiresAt.getTime() <= Date.now()
@@ -191,19 +225,225 @@ const isPageExpired = (page: typeof pages.$inferSelect) => {
   return isExpired(getEffectiveXoomshareExpiresAt(page))
 }
 
+const setXoomshareParticipantCookie = (
+  set: any,
+  pathCode: string,
+  participantId: string,
+) => {
+  const serializedCookie = createXoomshareCookie({
+    name: xoomshareCookieName(pathCode),
+    value: participantId,
+    maxAge: XOOMSHARE_TTL_HOURS * 60 * 60,
+    secure: XOOMSHARE_COOKIE_SECURE,
+  })
+  const existing = set.headers['set-cookie']
+  set.headers['set-cookie'] = existing
+    ? (Array.isArray(existing) ? [...existing, serializedCookie] : [existing, serializedCookie])
+    : serializedCookie
+}
+
+const resolveXoomshareRequestParticipant = ({
+  request,
+  set,
+  room,
+}: {
+  request: Request
+  set: any
+  room: typeof pages.$inferSelect
+}) => {
+  const pathCode = room.pathCode
+  if (!pathCode) return { participantId: null, isRoomOwner: false }
+
+  const participant = resolveXoomshareParticipant({
+    cookieHeader: request.headers.get('cookie'),
+    pathCode,
+    roomSessionId: room.sessionId,
+  })
+  if (participant.shouldPromoteLegacyOwner && participant.participantId) {
+    setXoomshareParticipantCookie(set, pathCode, participant.participantId)
+  }
+
+  return participant
+}
+
+const ensureXoomshareRequestParticipant = ({
+  request,
+  set,
+  room,
+}: {
+  request: Request
+  set: any
+  room: typeof pages.$inferSelect
+}) => {
+  const participant = resolveXoomshareRequestParticipant({ request, set, room })
+  if (participant.participantId) return participant
+
+  const pathCode = room.pathCode
+  if (!pathCode) return participant
+
+  const participantId = crypto.randomUUID()
+  setXoomshareParticipantCookie(set, pathCode, participantId)
+  return { participantId, isRoomOwner: false, shouldPromoteLegacyOwner: false }
+}
+
+const xoomshareRateLimiter = new FixedWindowRateLimiter()
+const XOOMSHARE_RATE_LIMITS = {
+  create: { limit: 5, windowMs: 60 * 60 * 1000 },
+  failedLookup: { limit: 30, windowMs: 60 * 1000 },
+  mutation: { limit: 120, windowMs: 60 * 1000 },
+  websocket: { limit: 30, windowMs: 60 * 1000 },
+} as const
+
+const getXoomshareRequestAddress = (request: Request) => {
+  // requestIP reads Bun's accepted socket address. Do not use X-Forwarded-For
+  // or client supplied identifiers here unless a trusted proxy boundary is set.
+  return app.server?.requestIP(request)?.address ?? 'unknown'
+}
+
+const enforceXoomshareRateLimit = (
+  request: Request,
+  set: any,
+  scope: keyof typeof XOOMSHARE_RATE_LIMITS,
+) => {
+  const policy = XOOMSHARE_RATE_LIMITS[scope]
+  const decision = xoomshareRateLimiter.consume(
+    `${scope}:${getXoomshareRequestAddress(request)}`,
+    policy.limit,
+    policy.windowMs,
+  )
+  if (decision.allowed) return true
+
+  set.status = 429
+  set.headers['retry-after'] = String(decision.retryAfterSeconds)
+  return false
+}
+
+const getXoomshareResourcePayloadBytes = (type: ResourceType, content: string) => (
+  type === 'image' || type === 'pdf' || type === 'file'
+    ? getResourceDataUrlByteLength(content)
+    : utf8ByteLength(content)
+)
+
+class XoomshareMutationError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message)
+  }
+}
+
+/** Serializes room mutations across all app instances on the root page row. */
+const lockXoomshareRoom = async (
+  tx: any,
+  pathCode: string,
+  expectedRoom?: typeof pages.$inferSelect,
+) => {
+  const [room] = await tx.update(pages)
+    .set({ resourceCount: sql`${pages.resourceCount}` })
+    .where(eq(pages.pathCode, pathCode))
+    .returning()
+  if (room && expectedRoom && (room.id !== expectedRoom.id || room.sessionId !== expectedRoom.sessionId)) {
+    throw new XoomshareMutationError(409, 'This Xoomshare room changed. Reload and try again.')
+  }
+  return room as typeof pages.$inferSelect | undefined
+}
+
+const publishXoomshareUpdate = (roomId: string, event: Record<string, unknown>) => {
+  try {
+    app.server?.publish(`page_${roomId}`, JSON.stringify(event))
+  } catch (error) {
+    // Do not let a post-commit websocket failure cause a caller to believe
+    // that a persisted mutation failed (or trigger quota compensation).
+    console.error('Publish Xoomshare update failed:', error)
+  }
+}
+
+const enqueueRemoteAssetDeletions = async (tx: any, assets: Array<{
+  providerPublicId: string | null
+  providerResourceType: string | null
+}>) => {
+  for (const asset of assets) {
+    if (!asset.providerPublicId || (asset.providerResourceType !== 'image' && asset.providerResourceType !== 'raw')) continue
+    await tx.insert(assetDeletionQueue).values({
+      providerPublicId: asset.providerPublicId,
+      providerResourceType: asset.providerResourceType,
+    }).onConflictDoNothing()
+  }
+}
+
+const queueFailedUncommittedAssetCleanup = async (asset: UploadedResourceAsset | null) => {
+  if (!asset?.publicId) return
+  let cleaned = false
+  try {
+    cleaned = await cleanupUncommittedResourceAsset(asset)
+  } catch (error) {
+    console.error('Immediate Cloudinary cleanup failed:', error)
+  }
+  if (cleaned) return
+  try {
+    await db.insert(assetDeletionQueue).values({
+      providerPublicId: asset.publicId,
+      providerResourceType: asset.resourceType,
+    }).onConflictDoNothing()
+  } catch (error) {
+    // Preserve the original request error; startup/periodic cleanup cannot help
+    // if the database itself is unavailable, so this is explicitly observable.
+    console.error('Failed to persist Cloudinary cleanup retry:', error)
+  }
+}
+
+/** Cloudinary destroy is idempotent; a duplicate worker can safely retry it. */
+const drainAssetDeletionQueue = async (limit = 25) => {
+  const pending = await db.select().from(assetDeletionQueue).limit(limit)
+  for (const item of pending) {
+    const removed = await destroyUploadedResourceAsset({
+      url: '',
+      publicId: item.providerPublicId,
+      resourceType: item.providerResourceType,
+    })
+    const outcome = getAssetDeletionQueueOutcome(removed)
+    if (outcome.remove) {
+      await db.delete(assetDeletionQueue).where(and(
+        eq(assetDeletionQueue.id, item.id),
+        eq(assetDeletionQueue.providerPublicId, item.providerPublicId),
+      ))
+    } else if (outcome.incrementAttempts) {
+      await db.update(assetDeletionQueue).set({
+        attempts: sql`${assetDeletionQueue.attempts} + 1`,
+        lastError: 'Cloudinary destroy failed; retry scheduled',
+        updatedAt: new Date(),
+      }).where(eq(assetDeletionQueue.id, item.id))
+    }
+  }
+}
+
 const cleanupExpiredXoomshareRooms = async () => {
   try {
-    const deletedPages = await db.delete(pages)
-      .where(and(isNotNull(pages.expiresAt), lt(pages.expiresAt, new Date())))
-      .returning({ id: pages.id })
-    const expiredByTtlPages = await db.delete(pages)
-      .where(and(isNotNull(pages.sessionId), lt(pages.createdAt, new Date(Date.now() - XOOMSHARE_TTL_MS))))
-      .returning({ id: pages.id })
-
-    const deletedCount = deletedPages.length + expiredByTtlPages.length
+    const now = new Date()
+    const candidates = await db.select().from(pages).where(and(
+      isNotNull(pages.pathCode),
+      isNotNull(pages.sessionId),
+      sql`(${pages.expiresAt} < ${now} OR ${pages.createdAt} < ${new Date(Date.now() - XOOMSHARE_TTL_MS)})`,
+    ))
+    let deletedCount = 0
+    for (const candidate of candidates) {
+      deletedCount += await db.transaction(async (tx) => {
+        const [lockedRoot] = await tx.update(pages).set({ resourceCount: sql`${pages.resourceCount}` })
+          .where(eq(pages.id, candidate.id)).returning()
+        if (!lockedRoot || !isPageExpired(lockedRoot)) return 0
+        const roomPages = await tx.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, lockedRoot.sessionId!))
+        const pageIds = roomPages.map((page) => page.id)
+        const assets = pageIds.length === 0 ? [] : await tx.select({
+          providerPublicId: resources.providerPublicId,
+          providerResourceType: resources.providerResourceType,
+        }).from(resources).where(inArray(resources.pageId, pageIds))
+        await enqueueRemoteAssetDeletions(tx, assets)
+        const deletedPages = await tx.delete(pages).where(eq(pages.sessionId, lockedRoot.sessionId!)).returning({ id: pages.id })
+        return deletedPages.length
+      })
+    }
     if (deletedCount > 0) {
       console.log(`Deleted ${deletedCount} expired Xoomshare page(s)`)
     }
+    await drainAssetDeletionQueue()
   } catch (error) {
     console.error('Expired Xoomshare cleanup failed:', error)
   }
@@ -213,6 +453,12 @@ void cleanupExpiredXoomshareRooms()
 setInterval(() => {
   void cleanupExpiredXoomshareRooms()
 }, XOOMSHARE_CLEANUP_INTERVAL_MS)
+
+const xoomshareSocketTopics = new WeakMap<object, string>()
+const xoomshareSocketQueryBudget = new SocketQueryBudget()
+const isAllowedXoomshareSocketOrigin = (request: Request) => {
+  return request.headers.get('origin') === CLIENT_ORIGIN
+}
 
 const app = new Elysia()
   .use(
@@ -224,17 +470,55 @@ const app = new Elysia()
   .use(
     jwt({
       name: 'jwt',
-      secret: process.env.JWT_SECRET || 'dev-secret-change-me',
+      secret: runtimeConfig.jwtSecret,
     })
   )
+  .onRequest(({ request, set }) => {
+    const contentLength = Number(request.headers.get('content-length'))
+    if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
+      set.status = 413
+      return { success: false, error: 'Request body must be smaller than 15MB' }
+    }
+  })
   .ws('/ws', {
-    message(ws, message: any) {
+    beforeHandle({ request, set }) {
+      if (!isAllowedXoomshareSocketOrigin(request)) {
+        set.status = 403
+        return { success: false, error: 'WebSocket origin is not allowed' }
+      }
+      if (!enforceXoomshareRateLimit(request, set, 'websocket')) {
+        return { success: false, error: 'Too many WebSocket connection attempts. Please try again later.' }
+      }
+    },
+    async message(ws, message: any) {
       let msg = message;
       if (typeof message === 'string') {
         try { msg = JSON.parse(message); } catch {}
       }
-      if (typeof msg === 'object' && msg !== null && msg.type === 'subscribe' && msg.pageId != null) {
+      if (typeof msg === 'object' && msg !== null && msg.type === 'subscribe') {
+        if (!isXoomsharePageId(msg.pageId)) return
+        if (!xoomshareSocketQueryBudget.consume(ws as object, 8, 60 * 1000)) {
+          ws.close(1008, 'Subscription query limit exceeded')
+          return
+        }
+        const [targetPage] = await db.select({ sessionId: pages.sessionId })
+          .from(pages)
+          .where(eq(pages.id, msg.pageId))
+          .limit(1)
+        if (!targetPage?.sessionId) return
+
+        const [room] = await db.select({ expiresAt: pages.expiresAt, createdAt: pages.createdAt, sessionId: pages.sessionId })
+          .from(pages)
+          .where(and(eq(pages.sessionId, targetPage.sessionId), isNotNull(pages.pathCode)))
+          .limit(1)
+        if (!room || isPageExpired(room as typeof pages.$inferSelect)) return
+
+        const previousTopic = xoomshareSocketTopics.get(ws as object)
+        if (previousTopic && previousTopic !== `page_${msg.pageId}`) {
+          ws.unsubscribe(previousTopic)
+        }
         ws.subscribe(`page_${msg.pageId}`)
+        xoomshareSocketTopics.set(ws as object, `page_${msg.pageId}`)
       }
     }
   })
@@ -243,23 +527,87 @@ const app = new Elysia()
     version: '1.0.0',
     status: 'running',
   }))
-  .get('/health', () => ({ status: 'ok', timestamp: new Date().toISOString() }))
+  .get('/health', () => ({ status: 'ok', devMode: DEV_MODE, timestamp: new Date().toISOString() }))
+
+  // Local-only development session. This route is unavailable outside an
+  // explicitly enabled development server on a loopback client origin.
+  .post('/auth/dev', async ({ jwt, cookie: { auth_token }, set }) => {
+    if (!DEV_MODE) {
+      set.status = 404
+      return { success: false, error: 'Not found' }
+    }
+
+    try {
+      await db.insert(users).values(DEV_USER).onConflictDoUpdate({
+        target: users.id,
+        set: {
+          email: DEV_USER.email,
+          username: DEV_USER.username,
+          name: DEV_USER.name,
+          picture: DEV_USER.picture,
+          visibility: DEV_USER.visibility,
+        },
+      })
+
+      const token = await jwt.sign(createAuthTokenClaims({ sub: DEV_USER.id, email: DEV_USER.email }))
+
+      auth_token?.set({
+        value: token,
+        httpOnly: true,
+        secure: false,
+        sameSite: 'lax',
+        maxAge: AUTH_TOKEN_MAX_AGE_SECONDS,
+        path: '/',
+      })
+
+      return { success: true, user: DEV_USER }
+    } catch (error) {
+      console.error('Development sign-in failed:', error)
+      set.status = 500
+      return { success: false, error: 'Unable to start the development session.' }
+    }
+  })
 
   // ── Google OAuth: Redirect to consent screen ──
-  .get('/auth/google', ({ redirect }) => {
+  .get('/auth/google', ({ redirect, cookie: { oauth_state } }) => {
+
+    const state = crypto.randomUUID()
+    oauth_state?.set({
+      value: state,
+      httpOnly: true,
+      secure: AUTH_COOKIE_SECURE,
+      sameSite: 'lax',
+      maxAge: 10 * 60,
+      path: '/auth/google',
+    })
+
     const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
       redirect_uri: GOOGLE_REDIRECT_URI,
       response_type: 'code',
       scope: 'openid email profile',
       access_type: 'offline',
+      state,
     })
     return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
   })
 
   // ── Google OAuth: Callback ──
-  .get('/auth/google/callback', async ({ query, jwt, cookie: { auth_token }, redirect }) => {
+  .get('/auth/google/callback', async ({ query, jwt, cookie: { auth_token, oauth_state }, redirect }) => {
     const { code } = query
+    const expectedState = oauth_state?.value as string | undefined
+    oauth_state?.set({
+      value: '',
+      httpOnly: true,
+      secure: AUTH_COOKIE_SECURE,
+      sameSite: 'lax',
+      maxAge: 0,
+      path: '/auth/google',
+    })
+    if (typeof query.state !== 'string' || !expectedState || query.state !== expectedState) {
+      return redirect(`${CLIENT_ORIGIN}/login?error=invalid_state`)
+    }
+
 
     if (!code) {
       return redirect(`${CLIENT_ORIGIN}/login?error=no_code`)
@@ -313,18 +661,14 @@ const app = new Elysia()
         })
       }
 
-      const token = await jwt.sign({
-        sub: userInfo.id,
-        email: userInfo.email,
-        iat: true,
-      })
+      const token = await jwt.sign(createAuthTokenClaims({ sub: userInfo.id, email: userInfo.email }))
 
       auth_token?.set({
         value: token,
         httpOnly: true,
-        secure: false, // set true in production
+        secure: AUTH_COOKIE_SECURE,
         sameSite: 'lax',
-        maxAge: 60 * 60 * 24 * 7, // 7 days
+        maxAge: AUTH_TOKEN_MAX_AGE_SECONDS,
         path: '/',
       })
 
@@ -335,73 +679,6 @@ const app = new Elysia()
     }
   })
 
-  // ── Google One Tap: Verify credential token ──
-  .post('/auth/google/one-tap', async ({ body, jwt, cookie: { auth_token } }) => {
-    const { credential } = body as { credential: string }
-
-    if (!credential) {
-      return { success: false, error: 'No credential provided' }
-    }
-
-    try {
-      const verifyRes = await fetch(
-        `https://oauth2.googleapis.com/tokeninfo?id_token=${credential}`
-      )
-
-      if (!verifyRes.ok) {
-        return { success: false, error: 'Invalid token' }
-      }
-
-      const payload = (await verifyRes.json()) as GoogleTokenPayload
-
-      if (payload.aud !== GOOGLE_CLIENT_ID) {
-        return { success: false, error: 'Token audience mismatch' }
-      }
-
-      // Upsert user into database
-      const existingUser = await db.select().from(users).where(eq(users.id, payload.sub)).limit(1)
-      if (existingUser.length === 0) {
-        let uniqueUsername = generateRandomUsername()
-        for (let i = 0; i < 5; i++) {
-          const clash = await db.select().from(users).where(eq(users.username, uniqueUsername)).limit(1)
-          if (clash.length === 0) break
-          uniqueUsername = generateRandomUsername()
-        }
-        await db.insert(users).values({
-          id: payload.sub,
-          email: payload.email,
-          name: payload.name,
-          picture: payload.picture,
-          username: uniqueUsername,
-        })
-      }
-
-      const token = await jwt.sign({
-        sub: payload.sub,
-        email: payload.email,
-        iat: true,
-      })
-
-      auth_token?.set({
-        value: token,
-        httpOnly: true,
-        secure: false,
-        sameSite: 'lax',
-        maxAge: 60 * 60 * 24 * 7,
-        path: '/',
-      })
-
-      const finalUser = await db.select().from(users).where(eq(users.id, payload.sub)).limit(1)
-
-      return {
-        success: true,
-        user: finalUser[0],
-      }
-    } catch (err) {
-      console.error('One Tap verification error:', err)
-      return { success: false, error: 'Verification failed' }
-    }
-  })
 
   // ── Auth: Get current user ──
   .get('/auth/me', async ({ jwt, cookie: { auth_token } }) => {
@@ -610,9 +887,15 @@ const app = new Elysia()
   // ══════════════════════════════════════════════
 
   // ── POST /xoomshare — Create an anonymous room ──
-  .post('/xoomshare', async ({ body, cookie: { xoomshare_session }, set }) => {
+  .post('/xoomshare', async ({ body, request, set }) => {
     try {
-      let pathCode = normalizePathCode((body as XoomshareCreateBody | undefined)?.pathCode)
+      if (!enforceXoomshareRateLimit(request, set, 'create')) {
+        return { success: false, error: 'Too many room creation attempts. Please try again later.' }
+      }
+      let pathCode = normalizeXoomsharePathCode({
+        value: (body as XoomshareCreateBody | undefined)?.pathCode,
+        reservedPathCodes: RESERVED_PATH_CODES,
+      })
 
       for (let attempt = 0; attempt < 5; attempt++) {
         const existing = await db.select().from(pages).where(eq(pages.pathCode, pathCode)).limit(1)
@@ -621,7 +904,7 @@ const app = new Elysia()
           set.status = 409
           return { success: false, error: 'That secret page code is already in use' }
         }
-        pathCode = generatePathCode()
+        pathCode = generateXoomsharePathCode()
       }
 
       const sessionId = crypto.randomUUID()
@@ -641,14 +924,7 @@ const app = new Elysia()
         return { success: false, error: 'Unable to create Xoomshare page' }
       }
 
-      xoomshare_session?.set({
-        value: sessionId,
-        httpOnly: true,
-        secure: false,
-        sameSite: 'lax',
-        maxAge: XOOMSHARE_TTL_HOURS * 60 * 60,
-        path: '/',
-      })
+      setXoomshareParticipantCookie(set, pathCode, sessionId)
 
       set.status = 201
       return {
@@ -661,7 +937,7 @@ const app = new Elysia()
     } catch (e: unknown) {
       console.error('Create Xoomshare room failed:', e)
 
-      if (e instanceof ResourceValidationError) {
+      if (e instanceof ResourceValidationError || e instanceof XoomsharePathCodeError) {
         set.status = 400
         return { success: false, error: e.message }
       }
@@ -672,18 +948,21 @@ const app = new Elysia()
   })
 
   // ── GET /xoomshare/:pathCode — Fetch an anonymous room ──
-  .get('/xoomshare/:pathCode', async ({ params, cookie: { xoomshare_session }, set }) => {
+  .get('/xoomshare/:pathCode', async ({ params, request, set }) => {
     try {
       // Find the main room entry via pathCode
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
+        if (!enforceXoomshareRateLimit(request, set, 'failedLookup')) {
+          return { success: false, error: 'Too many unsuccessful room lookups. Please try again later.' }
+        }
         set.status = 404
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
 
-      const sessionId = room[0]!.sessionId;
-      const isOwner = xoomshare_session?.value === sessionId;
-      const callerSession = xoomshare_session?.value || null;
+      const currentRoom = room[0]!
+      const participant = ensureXoomshareRequestParticipant({ request, set, room: currentRoom })
+      const sessionId = currentRoom.sessionId
 
       // Fetch all pages sharing this sessionId (multi-page support)
       let allPages = [];
@@ -705,14 +984,18 @@ const app = new Elysia()
       return {
         success: true,
         room: {
-          ...formatPage(room[0]!),
-          isOwner,
-          allowGuestResources: room[0]!.allowGuestResources,
+          ...formatPage(currentRoom),
+          isOwner: participant.isRoomOwner,
+          allowGuestResources: currentRoom.allowGuestResources,
         },
         pages: allPages.map(p => formatPage(p)),
         resources: pageResources.map(r => ({
           ...formatResource(r),
-          isOwner: isOwner || (!!callerSession && r.sessionId === callerSession),
+          isOwner: canManageXoomshareResource({
+            isRoomOwner: participant.isRoomOwner,
+            participantId: participant.participantId,
+            resourceParticipantId: r.sessionId,
+          }),
         })),
       }
     } catch (e) {
@@ -723,139 +1006,216 @@ const app = new Elysia()
   })
 
   // ── POST /xoomshare/:pathCode/pages — Add a new page to an anonymous room ──
-  .post('/xoomshare/:pathCode/pages', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+  .post('/xoomshare/:pathCode/pages', async ({ params, body, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare room not found or expired' }
       }
 
-      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      if (!participant.isRoomOwner) {
         set.status = 403
         return { success: false, error: 'Only the creator can add pages' }
       }
 
-      // Check page limit (e.g., max 10 pages)
-      const existingPages = await db.select().from(pages).where(eq(pages.sessionId, room[0]!.sessionId!))
-      if (existingPages.length >= 10) {
-        set.status = 400
-        return { success: false, error: 'Maximum of 10 pages allowed per Xoomshare room' }
-      }
-
-      const { name } = (body || {}) as { name?: string }
-      const newPageName = name || `Page ${existingPages.length + 1}`
+      const { name } = (body || {}) as { name?: unknown }
+      const requestedName = getBoundedXoomsharePageName(name)
       const vibrantColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`
+      const created = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare room not found or expired')
+        }
+        const existingPages = await tx.select().from(pages).where(eq(pages.sessionId, lockedRoom.sessionId!))
+        if (existingPages.length >= 10) {
+          throw new XoomshareMutationError(400, 'Maximum of 10 pages allowed per Xoomshare room')
+        }
+        const newPageName = requestedName || `Page ${existingPages.length + 1}`
+        const [newPage] = await tx.insert(pages).values({
+          userId: null,
+          color: vibrantColor,
+          name: newPageName,
+          visibility: 'public',
+          pathCode: null,
+          sessionId: lockedRoom.sessionId,
+          expiresAt: lockedRoom.expiresAt,
+          allowGuestResources: lockedRoom.allowGuestResources,
+        }).returning()
+        if (!newPage) throw new Error('Xoomshare page insert failed')
+        return { roomId: lockedRoom.id, page: newPage }
+      })
 
-      const newPage = await db.insert(pages).values({
-        userId: null,
-        color: vibrantColor,
-        name: newPageName,
-        visibility: 'public',
-        pathCode: null, // Only the root page has the pathCode
-        sessionId: room[0]!.sessionId,
-        expiresAt: room[0]!.expiresAt,
-      }).returning()
-
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'page_added', pageId: newPage[0]!.id }))
-      }
+      publishXoomshareUpdate(created.roomId, { type: 'page_added', pageId: created.page.id })
 
       set.status = 201
-      return { success: true, page: formatPage(newPage[0]!) }
+      return { success: true, page: formatPage(created.page) }
     } catch (e) {
       console.error('Create Xoomshare page failed:', e)
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
+      if (e instanceof ResourceValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
       set.status = 500
       return { success: false, error: 'Unable to create page' }
     }
   })
 
   // ── PATCH /xoomshare/:pathCode/pages/:id — Rename a page in an anonymous room ──
-  .patch('/xoomshare/:pathCode/pages/:id', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+  .patch('/xoomshare/:pathCode/pages/:id', async ({ params, body, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare room not found or expired' }
       }
 
-      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      if (!participant.isRoomOwner) {
         set.status = 403
         return { success: false, error: 'Only the creator can rename pages' }
       }
 
-      const { name } = body as { name: string }
-      if (!name || name.trim() === '') {
+      const { name } = (body || {}) as { name?: unknown }
+      const nextName = getBoundedXoomsharePageName(name)
+      if (!nextName) {
         set.status = 400
         return { success: false, error: 'Name is required' }
       }
-
-      const pageToUpdate = await db.select().from(pages).where(
-        and(eq(pages.id, params.id), eq(pages.sessionId, room[0]!.sessionId!))
-      ).limit(1)
-
-      if (pageToUpdate.length === 0) {
-        set.status = 404
-        return { success: false, error: 'Page not found in this room' }
+      if (!isXoomsharePageId(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid' }
       }
 
-      const updatedPage = await db.update(pages)
-        .set({ name: name.trim() })
-        .where(eq(pages.id, params.id))
-        .returning()
+      const updated = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare room not found or expired')
+        }
+        const [updatedPage] = await tx.update(pages)
+          .set({ name: nextName })
+          .where(and(eq(pages.id, params.id), eq(pages.sessionId, lockedRoom.sessionId!)))
+          .returning()
+        if (!updatedPage) throw new XoomshareMutationError(404, 'Page not found in this room')
+        return { roomId: lockedRoom.id, page: updatedPage }
+      })
 
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'page_updated', pageId: params.id }))
-      }
+      publishXoomshareUpdate(updated.roomId, { type: 'page_updated', pageId: params.id })
 
-      return { success: true, page: formatPage(updatedPage[0]!) }
+      return { success: true, page: formatPage(updated.page) }
     } catch (e) {
       console.error('Rename Xoomshare page failed:', e)
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
+      if (e instanceof ResourceValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
       set.status = 500
       return { success: false, error: 'Unable to rename page' }
     }
   })
 
   // ── DELETE /xoomshare/:pathCode/pages/:id — Delete a page in an anonymous room ──
-  .delete('/xoomshare/:pathCode/pages/:id', async ({ params, cookie: { xoomshare_session }, set }) => {
+  .delete('/xoomshare/:pathCode/pages/:id', async ({ params, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
+      if (!isXoomsharePageId(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare room not found or expired' }
       }
 
-      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      if (!participant.isRoomOwner) {
         set.status = 403
         return { success: false, error: 'Only the creator can delete pages' }
       }
 
-      // Check if it's the last page
-      const existingPages = await db.select().from(pages).where(eq(pages.sessionId, room[0]!.sessionId!))
-      if (existingPages.length <= 1) {
-        set.status = 400
-        return { success: false, error: 'Cannot delete the only page in the room' }
-      }
-
-      const pageToDelete = existingPages.find(p => p.id === params.id)
-      if (!pageToDelete) {
-        set.status = 404
-        return { success: false, error: 'Page not found in this room' }
-      }
-      
-      // If deleting the root page (which holds the pathCode), move the pathCode to another page
-      if (pageToDelete.pathCode) {
-        const nextRoot = existingPages.find(p => p.id !== params.id)
-        if (nextRoot) {
-          await db.update(pages).set({ pathCode: pageToDelete.pathCode }).where(eq(pages.id, nextRoot.id))
+      const pageDeletion = await db.transaction(async (tx) => {
+        // All resource and page mutations take this same root-row lock.
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          return { success: false as const, status: 404, error: 'Xoomshare room not found or expired' }
         }
+
+        const existingPages = await tx.select().from(pages).where(eq(pages.sessionId, lockedRoom.sessionId!))
+        if (existingPages.length <= 1) {
+          return { success: false as const, status: 400, error: 'Cannot delete the only page in the room' }
+        }
+        const pageToDelete = existingPages.find((page) => page.id === params.id)
+        if (!pageToDelete) {
+          return { success: false as const, status: 404, error: 'Page not found in this room' }
+        }
+
+        const deletedPageResources = await tx.select({
+          sizeBytes: resources.sizeBytes,
+          providerPublicId: resources.providerPublicId,
+          providerResourceType: resources.providerResourceType,
+        })
+          .from(resources)
+          .where(eq(resources.pageId, pageToDelete.id))
+        const deletedResourceCount = deletedPageResources.length
+        const deletedResourceBytes = deletedPageResources.reduce((total, resource) => total + resource.sizeBytes, 0)
+
+        await enqueueRemoteAssetDeletions(tx, deletedPageResources)
+        const [deletedPage] = await tx.delete(pages)
+          .where(and(eq(pages.id, pageToDelete.id), eq(pages.sessionId, lockedRoom.sessionId!)))
+          .returning()
+        if (!deletedPage) {
+          return { success: false as const, status: 409, error: 'Page changed before it could be deleted' }
+        }
+
+        if (deletedPage.pathCode) {
+          const nextRoot = existingPages.find((page) => page.id !== deletedPage.id)
+          if (!nextRoot) {
+            throw new Error('Xoomshare root promotion requires a remaining page')
+          }
+          // The old root is gone, so the unique path code can be safely moved.
+          // Its latest locked counters and all room settings follow the root.
+          await tx.update(pages).set({
+            pathCode: deletedPage.pathCode,
+            allowGuestResources: deletedPage.allowGuestResources,
+            expiresAt: deletedPage.expiresAt,
+            sessionId: deletedPage.sessionId,
+            resourceCount: sql`GREATEST(0, ${lockedRoom.resourceCount} - ${deletedResourceCount})`,
+            resourceBytes: sql`GREATEST(0, ${lockedRoom.resourceBytes} - ${deletedResourceBytes})`,
+          }).where(eq(pages.id, nextRoot.id))
+        } else if (deletedResourceCount > 0) {
+          await tx.update(pages).set({
+            resourceCount: sql`GREATEST(0, ${pages.resourceCount} - ${deletedResourceCount})`,
+            resourceBytes: sql`GREATEST(0, ${pages.resourceBytes} - ${deletedResourceBytes})`,
+          }).where(eq(pages.id, lockedRoom.id))
+        }
+
+        return { success: true as const }
+      })
+      if (!pageDeletion.success) {
+        set.status = pageDeletion.status
+        return { success: false, error: pageDeletion.error }
       }
 
-      await db.delete(pages).where(eq(pages.id, params.id))
-
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'page_deleted', pageId: params.id }))
-      }
+      publishXoomshareUpdate(room[0]!.id, { type: 'page_deleted', pageId: params.id })
+      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
@@ -867,15 +1227,19 @@ const app = new Elysia()
 
 
   // ── PATCH /xoomshare/:pathCode/settings — Toggle room settings (creator only) ──
-  .patch('/xoomshare/:pathCode/settings', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+  .patch('/xoomshare/:pathCode/settings', async ({ params, body, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
 
-      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      if (!participant.isRoomOwner) {
         set.status = 403
         return { success: false, error: 'Only the creator can change settings' }
       }
@@ -886,65 +1250,100 @@ const app = new Elysia()
         return { success: false, error: 'allowGuestResources must be a boolean' }
       }
 
-      // Update all pages in the room
-      const sessionId = room[0]!.sessionId!
-      await db.update(pages).set({ allowGuestResources }).where(eq(pages.sessionId, sessionId))
+      const updatedRoom = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare page not found or expired')
+        }
+        await tx.update(pages).set({ allowGuestResources }).where(eq(pages.sessionId, lockedRoom.sessionId!))
+        return lockedRoom
+      })
 
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'settings_updated' }))
-      }
+      publishXoomshareUpdate(updatedRoom.id, { type: 'settings_updated' })
 
       return { success: true, allowGuestResources }
     } catch (e) {
       console.error('Update Xoomshare settings failed:', e)
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
       set.status = 500
       return { success: false, error: 'Unable to update settings' }
     }
   })
 
   // ── DELETE /xoomshare/:pathCode — Destroy an entire anonymous room (creator only) ──
-  .delete('/xoomshare/:pathCode', async ({ params, cookie: { xoomshare_session }, set }) => {
+  .delete('/xoomshare/:pathCode', async ({ params, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
 
-      if (!xoomshare_session?.value || xoomshare_session.value !== room[0]!.sessionId) {
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      if (!participant.isRoomOwner) {
         set.status = 403
         return { success: false, error: 'Only the creator can destroy the session' }
       }
 
-      const sessionId = room[0]!.sessionId!
+      const destroyedRoomId = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare page not found or expired')
+        }
+        const roomPages = await tx.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, lockedRoom.sessionId!))
+        const assets = await tx.select({
+          providerPublicId: resources.providerPublicId,
+          providerResourceType: resources.providerResourceType,
+        }).from(resources).where(inArray(resources.pageId, roomPages.map((page) => page.id)))
+        await enqueueRemoteAssetDeletions(tx, assets)
+        await tx.delete(pages).where(eq(pages.sessionId, lockedRoom.sessionId!))
+        return lockedRoom.id
+      })
 
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'room_destroyed' }))
-      }
-
-      await db.delete(pages).where(eq(pages.sessionId, sessionId))
+      publishXoomshareUpdate(destroyedRoomId, { type: 'room_destroyed' })
+      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
       console.error('Destroy Xoomshare session failed:', e)
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
       set.status = 500
       return { success: false, error: 'Unable to destroy session' }
     }
   })
 
   // ── POST /xoomshare/:pathCode/resources — Add a resource to an anonymous room ──
-  .post('/xoomshare/:pathCode/resources', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+  .post('/xoomshare/:pathCode/resources', async ({ params, body, request, set }) => {
+    let uploadedAsset: UploadedResourceAsset | null = null
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
 
-      const isRoomOwner = xoomshare_session?.value && xoomshare_session.value === room[0]!.sessionId
-      if (!isRoomOwner && !room[0]!.allowGuestResources) {
+      let participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      if (!canCreateXoomshareResource({
+        isRoomOwner: participant.isRoomOwner,
+        allowGuestResources: room[0]!.allowGuestResources,
+      })) {
         set.status = 403
         return { success: false, error: 'Only the device that created this Xoomshare page can add resources' }
+      }
+      if (!participant.participantId) {
+        participant = ensureXoomshareRequestParticipant({ request, set, room: room[0]! })
       }
 
       const requestBody = body as { type?: unknown; content?: unknown; title?: unknown; x?: unknown; y?: unknown; pageId?: unknown }
@@ -955,10 +1354,21 @@ const app = new Elysia()
       }
 
       const requestContent = getRequiredString(content, 'Resource content')
-      const requestTitle = getOptionalString(title)
+      if (type === 'text' && requestContent.length > MAX_XOOMSHARE_TEXT_LENGTH) {
+        throw new ResourceValidationError(`Text resources must be ${MAX_XOOMSHARE_TEXT_LENGTH} characters or fewer`)
+      }
+      const requestTitle = getBoundedXoomshareOptionalString(title, 'Resource title', XOOMSHARE_MAX_TITLE_BYTES)
       const resourceX = normalizeResourceCoordinate(x, randomResourceCoordinate())
       const resourceY = normalizeResourceCoordinate(y, randomResourceCoordinate())
+      if (pageId !== undefined && pageId !== null && typeof pageId !== 'string') {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid' }
+      }
       const requestedPageId = typeof pageId === 'string' && pageId.trim().length > 0 ? pageId.trim() : room[0]!.id
+      if (!isXoomsharePageId(requestedPageId)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid' }
+      }
 
       let targetPage = room[0]!
       if (requestedPageId !== room[0]!.id) {
@@ -983,11 +1393,28 @@ const app = new Elysia()
       let finalTitle = requestTitle
       let finalDescription = null
       let finalThumbnailUrl = null
+      const contentBytes = getXoomshareResourcePayloadBytes(type, requestContent)
+
+      // This is intentionally only a cheap preflight. Remote uploads/OG
+      // retrieval happen outside the transaction; the quota is authoritatively
+      // checked and committed with the insert below under the root row lock.
+      if (
+        room[0]!.resourceCount >= XOOMSHARE_MAX_RESOURCES
+        || room[0]!.resourceBytes + getXoomshareResourceStorageBytes({ contentBytes, title: requestTitle }) > XOOMSHARE_MAX_RESOURCE_BYTES
+      ) {
+        set.status = 409
+        return { success: false, error: 'Xoomshare room storage limit reached.' }
+      }
 
       if (type === 'image' || type === 'pdf' || type === 'file') {
-        if (requestContent.startsWith('data:')) {
-          finalContent = await uploadResource(requestContent, type)
+        if (!requestContent.startsWith('data:')) {
+          throw new ResourceValidationError('Images, PDFs, and files must be valid base64 data URLs')
         }
+      }
+
+      if (type === 'image' || type === 'pdf' || type === 'file') {
+        uploadedAsset = await uploadResourceAsset(requestContent, type, { retainDataUrlLocally: DEV_MODE })
+        finalContent = uploadedAsset.url
       } else if (type === 'link') {
         const parsedUrl = new URL(requestContent)
         if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
@@ -995,31 +1422,94 @@ const app = new Elysia()
         }
 
         const ogData = await fetchOpenGraphData(requestContent)
-        if (ogData.title) finalTitle = ogData.title
+        if (ogData.title) finalTitle = truncateUtf8(ogData.title, XOOMSHARE_MAX_TITLE_BYTES)
         finalDescription = ogData.description
+          ? truncateUtf8(ogData.description, XOOMSHARE_MAX_DESCRIPTION_BYTES)
+          : null
         finalThumbnailUrl = ogData.thumbnailUrl
+          ? truncateUtf8(ogData.thumbnailUrl, XOOMSHARE_MAX_TITLE_BYTES)
+          : null
       }
 
-      const newResource = await db.insert(resources).values({
-        pageId: targetPage.id,
-        type,
-        content: finalContent,
+      const sizeBytes = getXoomshareResourceStorageBytes({
+        contentBytes,
         title: finalTitle,
         description: finalDescription,
         thumbnailUrl: finalThumbnailUrl,
-        x: resourceX,
-        y: resourceY,
-        sessionId: (xoomshare_session?.value as string) || null,
-      }).returning()
+      })
 
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'resource_updated' }))
-      }
+      const created = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare page not found or expired')
+        }
+        if (!canCreateXoomshareResource({
+          isRoomOwner: participant.isRoomOwner,
+          allowGuestResources: lockedRoom.allowGuestResources,
+        })) {
+          throw new XoomshareMutationError(403, 'Only the device that created this Xoomshare page can add resources')
+        }
+        const [currentTargetPage] = await tx.select({ id: pages.id })
+          .from(pages)
+          .where(and(eq(pages.id, targetPage.id), eq(pages.sessionId, lockedRoom.sessionId!)))
+          .limit(1)
+        if (!currentTargetPage) {
+          throw new XoomshareMutationError(404, 'Target page not found in this room')
+        }
+        const quota = await tx.update(pages)
+          .set({
+            resourceCount: sql`${pages.resourceCount} + 1`,
+            resourceBytes: sql`${pages.resourceBytes} + ${sizeBytes}`,
+          })
+          .where(and(
+            eq(pages.id, lockedRoom.id),
+            sql`${pages.resourceCount} < ${XOOMSHARE_MAX_RESOURCES}`,
+            sql`${pages.resourceBytes} + ${sizeBytes} <= ${XOOMSHARE_MAX_RESOURCE_BYTES}`,
+          ))
+          .returning({ id: pages.id })
+        if (quota.length !== 1) {
+          throw new XoomshareMutationError(409, `Xoomshare rooms are limited to ${XOOMSHARE_MAX_RESOURCES} resources and ${XOOMSHARE_MAX_RESOURCE_BYTES / (1024 * 1024)}MB of payloads.`)
+        }
+        const [newResource] = await tx.insert(resources).values({
+          pageId: currentTargetPage.id,
+          type,
+          content: finalContent,
+          title: finalTitle,
+          description: finalDescription,
+          thumbnailUrl: finalThumbnailUrl,
+          x: resourceX,
+          y: resourceY,
+          sessionId: participant.participantId,
+          sizeBytes,
+          providerPublicId: uploadedAsset?.publicId ?? null,
+          providerResourceType: uploadedAsset?.publicId ? uploadedAsset.resourceType : null,
+        }).returning()
+        if (!newResource) throw new Error('Xoomshare resource insert failed')
+        return { roomId: lockedRoom.id, resource: newResource }
+      })
+
+      // The database transaction committed the URL and quota atomically.
+      // Clearing this before any websocket/formatting work prevents a later
+      // non-DB exception from deleting a resource that is now persisted.
+      uploadedAsset = null
+      publishXoomshareUpdate(created.roomId, { type: 'resource_updated' })
 
       set.status = 201
-      return { success: true, resource: formatResource(newResource[0]!) }
+      return {
+        success: true,
+        resource: {
+          ...formatResource(created.resource),
+          isOwner: true,
+        },
+      }
     } catch (e: unknown) {
+      await queueFailedUncommittedAssetCleanup(uploadedAsset)
       console.error('Create Xoomshare resource failed:', e)
+
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
 
       if (e instanceof ResourceValidationError) {
         set.status = 400
@@ -1036,6 +1526,11 @@ const app = new Elysia()
         return { success: false, error: e.message }
       }
 
+      if (e instanceof ResourceUploadValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+
       if (e instanceof CloudinaryConfigurationError) {
         set.status = 500
         return { success: false, error: 'Uploads are not configured correctly.' }
@@ -1046,59 +1541,189 @@ const app = new Elysia()
         return { success: false, error: 'Upload failed. Please try again.' }
       }
 
+      if (e instanceof ResourceUploadError) {
+        set.status = 502
+        return { success: false, error: 'Upload failed. Please try again.' }
+      }
+
       set.status = 500
       return { success: false, error: 'Unable to save this resource right now. Please try again.' }
     }
   })
 
-  // ── PATCH /xoomshare/:pathCode/resources/:id/position — Move an anonymous resource ──
-  .patch('/xoomshare/:pathCode/resources/:id/position', async ({ params, body, cookie: { xoomshare_session }, set }) => {
+  // ── PATCH /xoomshare/:pathCode/resources/:id/text — Edit an owned text resource ──
+  .patch('/xoomshare/:pathCode/resources/:id/text', async ({ params, body, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
+      if (!isXoomsharePageId(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid' }
+      }
+      const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
+      if (room.length === 0 || isPageExpired(room[0]!)) {
+        set.status = 404
+        return { success: false, error: 'Xoomshare page not found or expired' }
+      }
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      const requestBody = body as { content?: unknown; title?: unknown }
+      const content = getRequiredString(requestBody.content, 'Resource content')
+      if (content.length > MAX_XOOMSHARE_TEXT_LENGTH) {
+        throw new ResourceValidationError(`Text resources must be ${MAX_XOOMSHARE_TEXT_LENGTH} characters or fewer`)
+      }
+      const nextSizeBytes = utf8ByteLength(content)
+      const requestedTitle = requestBody.title === undefined
+        ? undefined
+        : getBoundedXoomshareOptionalString(requestBody.title, 'Resource title', XOOMSHARE_MAX_TITLE_BYTES)
+      const values: { content: string; title?: string | null } = { content }
+      if (requestedTitle !== undefined) values.title = requestedTitle
+      const updated = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare page not found or expired')
+        }
+        const roomPages = await tx.select({ id: pages.id }).from(pages)
+          .where(eq(pages.sessionId, lockedRoom.sessionId!))
+        const [existingResource] = await tx.select().from(resources)
+          .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPages.map((page) => page.id))))
+          .limit(1)
+        if (!existingResource) throw new XoomshareMutationError(404, 'Resource not found')
+        if (existingResource.type !== 'text') {
+          throw new XoomshareMutationError(400, 'Only text resources can be edited')
+        }
+        if (!canManageXoomshareResource({
+          isRoomOwner: participant.isRoomOwner,
+          participantId: participant.participantId,
+          resourceParticipantId: existingResource.sessionId,
+        })) {
+          throw new XoomshareMutationError(403, 'You can only edit your own resources')
+        }
+        const nextTitle = requestedTitle === undefined ? existingResource.title : requestedTitle
+        const nextStoredBytes = getXoomshareResourceStorageBytes({
+          contentBytes: nextSizeBytes,
+          title: nextTitle,
+          description: existingResource.description,
+          thumbnailUrl: existingResource.thumbnailUrl,
+        })
+        const byteDelta = nextStoredBytes - existingResource.sizeBytes
+        if (byteDelta > 0) {
+          const quota = await tx.update(pages)
+            .set({ resourceBytes: sql`${pages.resourceBytes} + ${byteDelta}` })
+            .where(and(
+              eq(pages.id, lockedRoom.id),
+              sql`${pages.resourceBytes} + ${byteDelta} <= ${XOOMSHARE_MAX_RESOURCE_BYTES}`,
+            ))
+            .returning({ id: pages.id })
+          if (quota.length !== 1) throw new XoomshareMutationError(409, 'Xoomshare room storage limit reached.')
+        }
+        const [updatedResource] = await tx.update(resources)
+          .set({ ...values, sizeBytes: nextStoredBytes })
+          .where(and(
+            eq(resources.id, params.id),
+            eq(resources.sizeBytes, existingResource.sizeBytes),
+            eq(resources.content, existingResource.content),
+          ))
+          .returning()
+        if (!updatedResource) {
+          throw new XoomshareMutationError(409, 'This text changed before your edit could be saved. Refresh and try again.')
+        }
+        if (byteDelta < 0) {
+          await tx.update(pages)
+            .set({ resourceBytes: sql`GREATEST(0, ${pages.resourceBytes} - ${-byteDelta})` })
+            .where(eq(pages.id, lockedRoom.id))
+        }
+        return { roomId: lockedRoom.id, resource: updatedResource }
+      })
+
+      publishXoomshareUpdate(updated.roomId, { type: 'resource_updated' })
+
+      return {
+        success: true,
+        resource: {
+          ...formatResource(updated.resource),
+          isOwner: true,
+        },
+      }
+    } catch (e: unknown) {
+      console.error('Update Xoomshare text resource failed:', e)
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
+      if (e instanceof ResourceValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+      set.status = 500
+      return { success: false, error: 'Unable to update this text resource right now.' }
+    }
+  })
+
+  // ── PATCH /xoomshare/:pathCode/resources/:id/position — Move an anonymous resource ──
+  .patch('/xoomshare/:pathCode/resources/:id/position', async ({ params, body, request, set }) => {
+    try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
+      if (!isXoomsharePageId(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
 
-      const isRoomOwner = xoomshare_session?.value && xoomshare_session.value === room[0]!.sessionId
-      // We'll check resource-level ownership below after fetching the resource
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
 
       const { x, y } = body as { x?: unknown; y?: unknown }
       const resourceX = normalizeResourceCoordinate(x, 100)
       const resourceY = normalizeResourceCoordinate(y, 100)
-      const roomPages = room[0]!.sessionId
-        ? await db.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, room[0]!.sessionId))
-        : [{ id: room[0]!.id }]
-      const roomPageIds = roomPages.map((page) => page.id)
+      const moved = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare page not found or expired')
+        }
+        const roomPages = await tx.select({ id: pages.id }).from(pages)
+          .where(eq(pages.sessionId, lockedRoom.sessionId!))
+        const roomPageIds = roomPages.map((page) => page.id)
+        const [existingResource] = await tx.select().from(resources)
+          .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
+          .limit(1)
+        if (!existingResource) throw new XoomshareMutationError(404, 'Resource not found')
+        if (!canManageXoomshareResource({
+          isRoomOwner: participant.isRoomOwner,
+          participantId: participant.participantId,
+          resourceParticipantId: existingResource.sessionId,
+        })) {
+          throw new XoomshareMutationError(403, 'You can only move your own resources')
+        }
+        const [updatedResource] = await tx.update(resources)
+          .set({ x: resourceX, y: resourceY })
+          .where(eq(resources.id, params.id))
+          .returning()
+        if (!updatedResource) throw new XoomshareMutationError(409, 'Resource changed before it could be moved')
+        return { roomId: lockedRoom.id, resource: updatedResource }
+      })
 
-      // Fetch resource first to check ownership
-      const [existingResource] = await db.select().from(resources)
-        .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
-        .limit(1)
+      publishXoomshareUpdate(moved.roomId, { type: 'resource_updated' })
 
-      if (!existingResource) {
-        set.status = 404
-        return { success: false, error: 'Resource not found' }
+      return {
+        success: true,
+        resource: {
+          ...formatResource(moved.resource),
+          isOwner: true,
+        },
       }
-
-      const isResourceOwner = !!xoomshare_session?.value && existingResource.sessionId === xoomshare_session.value
-      if (!isRoomOwner && !isResourceOwner) {
-        set.status = 403
-        return { success: false, error: 'You can only move your own resources' }
-      }
-
-      const [updatedResource] = await db.update(resources)
-        .set({ x: resourceX, y: resourceY })
-        .where(eq(resources.id, params.id))
-        .returning()
-
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'resource_updated' }))
-      }
-
-      return { success: true, resource: formatResource(updatedResource!) }
     } catch (e: unknown) {
       console.error('Update Xoomshare resource position failed:', e)
+
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
 
       if (e instanceof ResourceValidationError) {
         set.status = 400
@@ -1111,46 +1736,67 @@ const app = new Elysia()
   })
 
   // ── DELETE /xoomshare/:pathCode/resources/:id — Delete an anonymous resource ──
-  .delete('/xoomshare/:pathCode/resources/:id', async ({ params, cookie: { xoomshare_session }, set }) => {
+  .delete('/xoomshare/:pathCode/resources/:id', async ({ params, request, set }) => {
     try {
+      if (!enforceXoomshareRateLimit(request, set, 'mutation')) {
+        return { success: false, error: 'Too many Xoomshare changes. Please try again later.' }
+      }
+      if (!isXoomsharePageId(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid' }
+      }
       const room = await db.select().from(pages).where(eq(pages.pathCode, params.pathCode)).limit(1)
       if (room.length === 0 || isPageExpired(room[0]!)) {
         set.status = 404
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
 
-      const isRoomOwner = xoomshare_session?.value && xoomshare_session.value === room[0]!.sessionId
+      const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
+      const deleted = await db.transaction(async (tx) => {
+        const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
+        if (!lockedRoom || isPageExpired(lockedRoom)) {
+          throw new XoomshareMutationError(404, 'Xoomshare page not found or expired')
+        }
+        const roomPages = await tx.select({ id: pages.id }).from(pages)
+          .where(eq(pages.sessionId, lockedRoom.sessionId!))
+        const roomPageIds = roomPages.map((page) => page.id)
+        const [existingResource] = await tx.select().from(resources)
+          .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
+          .limit(1)
+        if (!existingResource) throw new XoomshareMutationError(404, 'Resource not found')
+        if (!canManageXoomshareResource({
+          isRoomOwner: participant.isRoomOwner,
+          participantId: participant.participantId,
+          resourceParticipantId: existingResource.sessionId,
+        })) {
+          throw new XoomshareMutationError(403, 'You can only delete your own resources')
+        }
+        // RETURNING gates the counter release: duplicate requests cannot both
+        // consume the same resource's bytes after they serialize on the root.
+        await enqueueRemoteAssetDeletions(tx, [existingResource])
+        const [deletedResource] = await tx.delete(resources)
+          .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
+          .returning({ id: resources.id, sizeBytes: resources.sizeBytes })
+        if (!deletedResource) throw new XoomshareMutationError(404, 'Resource not found')
+        await tx.update(pages)
+          .set({
+            resourceCount: sql`GREATEST(0, ${pages.resourceCount} - 1)`,
+            resourceBytes: sql`GREATEST(0, ${pages.resourceBytes} - ${deletedResource.sizeBytes})`,
+          })
+          .where(eq(pages.id, lockedRoom.id))
+        return { roomId: lockedRoom.id }
+      })
 
-      const roomPages = room[0]!.sessionId
-        ? await db.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, room[0]!.sessionId))
-        : [{ id: room[0]!.id }]
-      const roomPageIds = roomPages.map((page) => page.id)
-
-      // Fetch resource to check ownership
-      const [existingResource] = await db.select().from(resources)
-        .where(and(eq(resources.id, params.id), inArray(resources.pageId, roomPageIds)))
-        .limit(1)
-
-      if (!existingResource) {
-        set.status = 404
-        return { success: false, error: 'Resource not found' }
-      }
-
-      const isResourceOwner = !!xoomshare_session?.value && existingResource.sessionId === xoomshare_session.value
-      if (!isRoomOwner && !isResourceOwner) {
-        set.status = 403
-        return { success: false, error: 'You can only delete your own resources' }
-      }
-
-      await db.delete(resources).where(eq(resources.id, params.id))
-
-      if (app.server) {
-        app.server.publish(`page_${room[0]!.id}`, JSON.stringify({ type: 'resource_updated' }))
-      }
+      publishXoomshareUpdate(deleted.roomId, { type: 'resource_updated' })
+      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
       console.error('Delete Xoomshare resource failed:', e)
+      if (e instanceof XoomshareMutationError) {
+        set.status = e.status
+        return { success: false, error: e.message }
+      }
       set.status = 500
       return { success: false, error: 'Unable to delete this resource right now.' }
     }
@@ -1183,20 +1829,26 @@ const app = new Elysia()
         userPages = await db.select().from(pages).where(eq(pages.userId, payload.sub as string))
       }
       
-      return { pages: userPages.map(p => ({ ...p, created_at: p.createdAt.toISOString() })) }
+      return { pages: userPages.map(formatPage) }
     } catch {
       return { pages: [] }
     }
   })
 
   // ── POST /pages — Create a new page ──
-  .post('/pages', async ({ body, jwt, cookie: { auth_token } }) => {
+  .post('/pages', async ({ body, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
-    if (!token) return { success: false, error: 'unauthorized' }
+    if (!token) {
+      set.status = 401
+      return { success: false, error: 'Please sign in again to create pages.' }
+    }
 
     try {
       const payload = await jwt.verify(token)
-      if (!payload) return { success: false, error: 'invalid token' }
+      if (!payload) {
+        set.status = 401
+        return { success: false, error: 'Please sign in again to create pages.' }
+      }
 
       const { color, name, visibility = 'private' } = body as { color: string; name: string; visibility?: string }
 
@@ -1236,7 +1888,7 @@ const app = new Elysia()
         return { success: false, error: 'Failed to create page' }
       }
 
-      return { success: true, page: { ...newPage[0]!, created_at: newPage[0]!.createdAt.toISOString() } }
+      return { success: true, page: formatPage(newPage[0]!) }
     } catch (e) {
       console.error(e)
       return { success: false, error: 'server error' }
@@ -1244,7 +1896,7 @@ const app = new Elysia()
   })
 
   // ── PATCH /pages/:id — Update a page name ──
-  .patch('/pages/:id', async ({ params, body, jwt, cookie: { auth_token } }) => {
+  .patch('/pages/:id', async ({ params, body, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
     if (!token) return { success: false, error: 'unauthorized' }
 
@@ -1254,6 +1906,11 @@ const app = new Elysia()
 
       const { id } = params
       const { name } = body as { name: string }
+      if (!isUuid(id)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid.' }
+      }
+
 
       if (!name) {
         return { success: false, error: 'name is required' }
@@ -1291,14 +1948,14 @@ const app = new Elysia()
         return { success: false, error: 'page not found' }
       }
 
-      return { success: true, page: { ...updatedPage[0]!, created_at: updatedPage[0]!.createdAt.toISOString() } }
+      return { success: true, page: formatPage(updatedPage[0]!) }
     } catch {
       return { success: false, error: 'server error' }
     }
   })
 
   // ── DELETE /pages/:id — Delete a page ──
-  .delete('/pages/:id', async ({ params, jwt, cookie: { auth_token } }) => {
+  .delete('/pages/:id', async ({ params, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
     if (!token) return { success: false, error: 'unauthorized' }
 
@@ -1308,8 +1965,24 @@ const app = new Elysia()
 
       const { id } = params
 
-      await db.delete(pages)
-        .where(and(eq(pages.id, id), eq(pages.userId, payload.sub as string)))
+      if (!isUuid(id)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid.' }
+      }
+
+      const deleted = await db.transaction(async (tx) => {
+        const [page] = await tx.select({ id: pages.id }).from(pages)
+          .where(and(eq(pages.id, id), eq(pages.userId, payload.sub as string))).limit(1)
+        if (!page) return false
+        const assets = await tx.select({
+          providerPublicId: resources.providerPublicId,
+          providerResourceType: resources.providerResourceType,
+        }).from(resources).where(eq(resources.pageId, page.id))
+        await enqueueRemoteAssetDeletions(tx, assets)
+        await tx.delete(pages).where(eq(pages.id, page.id))
+        return true
+      })
+      if (deleted) void drainAssetDeletionQueue()
 
       return { success: true }
     } catch {
@@ -1321,7 +1994,7 @@ const app = new Elysia()
   // ══════════════════════════════════════════════
 
   // ── GET /pages/:id/resources — List resources for a page ──
-  .get('/pages/:id/resources', async ({ params, jwt, cookie: { auth_token } }) => {
+  .get('/pages/:id/resources', async ({ params, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
     if (!token) return { resources: [] }
 
@@ -1332,11 +2005,16 @@ const app = new Elysia()
       const { id } = params
 
       // Verify page ownership
+      if (!isUuid(id)) {
+        set.status = 400
+        return { resources: [] }
+      }
+
       const page = await db.select().from(pages).where(and(eq(pages.id, id), eq(pages.userId, payload.sub as string))).limit(1)
       if (page.length === 0) return { resources: [] }
 
       const pageResources = await db.select().from(resources).where(eq(resources.pageId, id))
-      return { resources: pageResources.map(r => ({ ...r, created_at: r.createdAt.toISOString() })) }
+      return { resources: pageResources.map(formatResource) }
     } catch {
       return { resources: [] }
     }
@@ -1350,6 +2028,7 @@ const app = new Elysia()
       return { success: false, error: 'Please sign in again to save resources.' }
     }
 
+    let uploadedAsset: UploadedResourceAsset | null = null
     try {
       const payload = await jwt.verify(token)
       if (!payload) {
@@ -1360,6 +2039,11 @@ const app = new Elysia()
       const { id } = params
       const requestBody = body as { type?: unknown; content?: unknown; title?: unknown; x?: unknown; y?: unknown }
       const { type, content, title, x, y } = requestBody
+      if (!isUuid(id)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid.' }
+      }
+
 
       if (!isResourceType(type)) {
         throw new ResourceValidationError('Resource type is not supported')
@@ -1384,9 +2068,11 @@ const app = new Elysia()
       let finalThumbnailUrl = null
 
       if (finalType === 'image' || finalType === 'pdf' || finalType === 'file') {
-        if (requestContent.startsWith('data:')) {
-          finalContent = await uploadResource(requestContent, finalType)
+        if (!requestContent.startsWith('data:')) {
+          throw new ResourceValidationError('Images, PDFs, and files must be valid base64 data URLs')
         }
+        uploadedAsset = await uploadResourceAsset(requestContent, finalType, { retainDataUrlLocally: DEV_MODE })
+        finalContent = uploadedAsset.url
       } else if (finalType === 'link') {
         const parsedUrl = new URL(requestContent)
         if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
@@ -1408,15 +2094,21 @@ const app = new Elysia()
         thumbnailUrl: finalThumbnailUrl,
         x: resourceX,
         y: resourceY,
+        providerPublicId: uploadedAsset?.publicId ?? null,
+        providerResourceType: uploadedAsset?.publicId ? uploadedAsset.resourceType : null,
       }).returning()
+
+      // Persisted metadata owns the remote asset from this point onward.
+      uploadedAsset = null
 
       if (app.server) {
         app.server.publish(`page_${id}`, JSON.stringify({ type: 'resource_updated' }))
       }
 
       set.status = 201
-      return { success: true, resource: { ...newResource[0]!, created_at: newResource[0]!.createdAt.toISOString() } }
+      return { success: true, resource: formatResource(newResource[0]!) }
     } catch (e: unknown) {
+      await queueFailedUncommittedAssetCleanup(uploadedAsset)
       console.error('Create resource failed:', e)
 
       if (e instanceof ResourceValidationError) {
@@ -1434,6 +2126,11 @@ const app = new Elysia()
         return { success: false, error: e.message }
       }
 
+      if (e instanceof ResourceUploadValidationError) {
+        set.status = 400
+        return { success: false, error: e.message }
+      }
+
       if (e instanceof CloudinaryConfigurationError) {
         set.status = 500
         return { success: false, error: 'Uploads are not configured correctly.' }
@@ -1444,16 +2141,26 @@ const app = new Elysia()
         return { success: false, error: 'Upload failed. Please try again.' }
       }
 
+      if (e instanceof ResourceUploadError) {
+        set.status = 502
+        return { success: false, error: 'Upload failed. Please try again.' }
+      }
+
       set.status = 500
       return { success: false, error: 'Unable to save this resource right now. Please try again.' }
     }
   })
   // ── GET /resources/:id — Fetch a single resource ──
-  .get('/resources/:id', async ({ params }) => {
+  .get('/resources/:id', async ({ params, set }) => {
     try {
+      if (!isUuid(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid.' }
+      }
       const [resource] = await db.select().from(resources).where(eq(resources.id, params.id)).limit(1)
       if (!resource) return { success: false, error: 'not found' }
-      return { success: true, resource }
+      return { success: true, resource: formatResource(resource) }
+
     } catch (e) {
       console.error(e)
       return { success: false, error: 'server error' }
@@ -1479,6 +2186,11 @@ const app = new Elysia()
       const resourceX = normalizeResourceCoordinate(x, 100)
       const resourceY = normalizeResourceCoordinate(y, 100)
       
+      if (!isUuid(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid.' }
+      }
+
       // Check if user owns the page this resource belongs to
       const [resource] = await db
         .select({ pageId: resources.pageId })
@@ -1510,7 +2222,7 @@ const app = new Elysia()
         app.server.publish(`page_${resource.pageId}`, JSON.stringify({ type: 'resource_updated' }))
       }
 
-      return { success: true, resource: updatedResource };
+      return { success: true, resource: formatResource(updatedResource!) };
     } catch (e: unknown) {
       console.error('Update resource position failed:', e)
 
@@ -1524,8 +2236,82 @@ const app = new Elysia()
     }
   })
 
+  // ── PATCH /resources/:id/content — Edit a saved text resource ──
+  .patch('/resources/:id/content', async ({ params, body, jwt, cookie: { auth_token }, set }) => {
+    const token = auth_token?.value as string | undefined
+    if (!token) {
+      set.status = 401
+      return { success: false, error: 'Please sign in again to edit resources.' }
+    }
+
+    try {
+      const session = await jwt.verify(token)
+      if (!session || !session.sub) {
+        set.status = 401
+        return { success: false, error: 'Please sign in again to edit resources.' }
+      }
+
+      if (!isUuid(params.id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid.' }
+      }
+
+      const { content } = body as { content?: unknown }
+      if (typeof content !== 'string' || content.trim().length === 0) {
+        set.status = 400
+        return { success: false, error: 'Text content is required.' }
+      }
+
+      const [resource] = await db
+        .select({ pageId: resources.pageId, type: resources.type })
+        .from(resources)
+        .where(eq(resources.id, params.id))
+        .limit(1)
+
+      if (!resource) {
+        set.status = 404
+        return { success: false, error: 'Resource not found.' }
+      }
+
+      if (resource.type !== 'text') {
+        set.status = 400
+        return { success: false, error: 'Only text resources can be edited.' }
+      }
+
+      const [page] = await db
+        .select({ userId: pages.userId })
+        .from(pages)
+        .where(eq(pages.id, resource.pageId))
+        .limit(1)
+
+      if (!page || page.userId !== session.sub) {
+        set.status = 403
+        return { success: false, error: 'You do not have access to this resource.' }
+      }
+
+      const [updatedResource] = await db
+        .update(resources)
+        .set({ content })
+        .where(eq(resources.id, params.id))
+        .returning()
+
+      if (app.server) {
+        app.server.publish(`page_${resource.pageId}`, JSON.stringify({ type: 'resource_updated' }))
+      }
+
+      return {
+        success: true,
+        resource: formatResource(updatedResource!),
+      }
+    } catch (e: unknown) {
+      console.error('Update resource content failed:', e)
+      set.status = 500
+      return { success: false, error: 'Unable to update this text right now.' }
+    }
+  })
+
   // ── DELETE /resources/:id — Delete a resource ──
-  .delete('/resources/:id', async ({ params, jwt, cookie: { auth_token } }) => {
+  .delete('/resources/:id', async ({ params, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
     if (!token) return { success: false, error: 'unauthorized' }
 
@@ -1535,9 +2321,19 @@ const app = new Elysia()
 
       const { id } = params
 
+      if (!isUuid(id)) {
+        set.status = 400
+        return { success: false, error: 'Resource id is invalid.' }
+      }
+
       // We need to verify the user owns the page this resource belongs to.
       // Drizzle join for deletion ownership verification:
-      const resourceToDelete = await db.select({ resourceId: resources.id, pageId: resources.pageId })
+      const resourceToDelete = await db.select({
+        resourceId: resources.id,
+        pageId: resources.pageId,
+        providerPublicId: resources.providerPublicId,
+        providerResourceType: resources.providerResourceType,
+      })
         .from(resources)
         .innerJoin(pages, eq(resources.pageId, pages.id))
         .where(and(eq(resources.id, id), eq(pages.userId, payload.sub as string)))
@@ -1547,11 +2343,15 @@ const app = new Elysia()
         return { success: false, error: 'resource not found' }
       }
 
-      await db.delete(resources).where(eq(resources.id, id))
+      await db.transaction(async (tx) => {
+        await enqueueRemoteAssetDeletions(tx, [resourceToDelete[0]!])
+        await tx.delete(resources).where(eq(resources.id, id))
+      })
 
       if (app.server) {
         app.server.publish(`page_${resourceToDelete[0]!.pageId}`, JSON.stringify({ type: 'resource_updated' }))
       }
+      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
@@ -1591,7 +2391,7 @@ const app = new Elysia()
           username: user.username,
           picture: user.picture,
         },
-        pages: userPages,
+        pages: userPages.map(formatPage),
       }
     } catch (e) {
       console.error(e)
@@ -1600,15 +2400,21 @@ const app = new Elysia()
   })
 
   // ── GET /public/pages/:pageId/resources — Get resources for a public page ──
-  .get('/public/pages/:pageId/resources', async ({ params }) => {
+  .get('/public/pages/:pageId/resources', async ({ params, set }) => {
     try {
       const { pageId } = params
+      if (!isUuid(pageId)) {
+        set.status = 400
+        return { success: false, error: 'Page id is invalid.' }
+      }
+
 
       // Verify the page exists and is public
       const pageList = await db.select().from(pages).where(eq(pages.id, pageId)).limit(1)
       if (pageList.length === 0) {
         return { success: false, error: 'Page not found' }
       }
+
       const page = pageList[0]!
 
       if (page.visibility !== 'public') {
@@ -1616,7 +2422,7 @@ const app = new Elysia()
       }
 
       const pageResources = await db.select().from(resources).where(eq(resources.pageId, pageId))
-      return { success: true, resources: pageResources }
+      return { success: true, resources: pageResources.map(formatResource) }
     } catch (e) {
       console.error(e)
       return { success: false, error: 'server error' }
@@ -1624,7 +2430,13 @@ const app = new Elysia()
   })
 
 
-  .listen(Number(process.env.PORT) || 5000)
+const serverPort = Number(process.env.PORT) || 5000
+const serverOptions = { port: serverPort, maxRequestBodySize: MAX_REQUEST_BODY_BYTES }
+if (DEV_MODE) {
+  app.listen({ ...serverOptions, hostname: '127.0.0.1' })
+} else {
+  app.listen(serverOptions)
+}
 
 console.log(
   `🚀 Saveswitch API running at http://${app.server?.hostname}:${app.server?.port}`

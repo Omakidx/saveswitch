@@ -144,7 +144,7 @@ export default function ResourceMiniPanel({
                         e.stopPropagation();
                         onDeletePage(page.id);
                       }}
-                      className="absolute flex cursor-pointer items-center justify-center rounded-full border-none bg-red-500 opacity-100 shadow-[0_2px_8px_rgba(0,0,0,0.5)] transition-all duration-200 hover:scale-110 hover:bg-red-600 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
+                      className="absolute flex cursor-pointer items-center justify-center rounded-full border border-[#FF2A2A]/25 bg-white/70 opacity-100 shadow-[0_2px_8px_rgba(0,0,0,0.16)] transition-all duration-200 hover:scale-110 hover:bg-[#FF2A2A]/10 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                       style={{ width: 22, height: 22, top: 0, right: 0, zIndex: 10 }}
                       aria-label="Delete Page"
                       title="Delete Page"
@@ -155,7 +155,6 @@ export default function ResourceMiniPanel({
                         alt="Delete"
                         width={12}
                         height={12}
-                        style={{ filter: "brightness(0) invert(1)" }}
                       />
                     </button>
                   )}

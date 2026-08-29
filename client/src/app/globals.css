@@ -3,6 +3,8 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --scrollbar-thumb: rgba(87, 97, 113, 0.46);
+  --scrollbar-thumb-hover: rgba(72, 82, 98, 0.62);
 
   /* ── Dashboard Design Tokens (from Figma) ── */
   --color-app-bg: #050505;
@@ -73,6 +75,40 @@ body {
 html,
 body {
   min-height: 100%;
+}
+
+/* Visible scrollbars stay intentionally quiet across the cream canvas and
+   translucent dark chrome. Components that explicitly hide their scrollbar
+   keep that behavior through their more-specific rules below. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 button,

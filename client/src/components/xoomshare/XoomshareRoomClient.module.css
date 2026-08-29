@@ -1,0 +1,363 @@
+.room {
+  --xoom-ink: #383932;
+  --xoom-muted: #716f62;
+  --xoom-blue: #176bff;
+  min-height: 100dvh;
+  color: var(--xoom-ink);
+  background-color: #fbf8dc;
+  background-image: radial-gradient(circle, rgba(77, 78, 62, 0.22) 1px, transparent 1.15px);
+  background-size: 24px 24px;
+}
+
+.room :global(.xoomshare-shell) {
+  background: transparent;
+}
+
+.roomHeader {
+  pointer-events: none;
+}
+
+.roomHeader > * {
+  pointer-events: auto;
+}
+
+.chrome {
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  background: rgba(87, 89, 77, 0.60);
+  box-shadow: 0 10px 28px rgba(68, 63, 42, 0.14);
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+}
+
+.glassButton {
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.30);
+  color: #34352e;
+  box-shadow: 0 4px 14px rgba(62, 59, 39, 0.08);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.glassButton:hover {
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.popover,
+.pageDock,
+.categoryRail,
+.renamePageButton {
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  background: rgba(250, 248, 225, 0.66);
+  box-shadow: 0 10px 26px rgba(71, 66, 42, 0.13);
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+}
+
+.categoryRail {
+  border-radius: 16px;
+}
+
+.categoryButton {
+  border: 1px solid transparent;
+  color: #66675c;
+  background: transparent;
+}
+
+.categoryButton:hover {
+  color: #34352e;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.categoryButtonActive {
+  border-color: rgba(255, 255, 255, 0.7);
+  color: #fffef5;
+  background: rgba(83, 85, 73, 0.76);
+  box-shadow: 0 4px 10px rgba(67, 63, 42, 0.16);
+}
+
+.categoryCount {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  min-width: 15px;
+  height: 15px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 999px;
+  background: #176bff;
+  color: white;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.inlineCount {
+  display: grid;
+  min-width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(79, 80, 70, 0.12);
+  color: #595a4f;
+  font-size: 9px;
+}
+
+.popover {
+  color: #414239;
+}
+
+.popoverAction,
+.resourceRow {
+  display: flex;
+  width: 100%;
+  min-height: 33px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  padding: 0 9px;
+  color: #484940;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.popoverAction:hover,
+.resourceRow:hover {
+  background: rgba(255, 255, 255, 0.53);
+}
+
+.resourceList {
+  max-height: min(45dvh, 260px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(91, 91, 77, 0.48) transparent;
+}
+
+.resourceList::-webkit-scrollbar {
+  width: 5px;
+}
+
+.resourceList::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(91, 91, 77, 0.48);
+}
+
+.resourceRow span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pageDock {
+  box-shadow: 0 9px 22px rgba(71, 66, 42, 0.15);
+}
+
+.pageDock > div {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(91, 91, 77, 0.46) transparent;
+}
+
+.pageDock > div::-webkit-scrollbar {
+  height: 5px;
+}
+
+.pageDock > div::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.pageDock > div::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(91, 91, 77, 0.46);
+}
+
+.pageSwatch,
+.addPageButton,
+.canvasToggle {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 10px;
+  color: #505147;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.48);
+  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.pageSwatch {
+  background-image: radial-gradient(circle, rgba(73, 75, 59, 0.16) 1px, transparent 1.05px);
+  background-size: 10px 10px;
+}
+
+.pageSwatch:hover,
+.addPageButton:hover,
+.canvasToggle:hover {
+  transform: translateY(-1px);
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
+.pageSwatchActive {
+  border: 2px solid #176bff;
+  box-shadow: 0 0 0 1px rgba(23, 107, 255, 0.12), inset 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.pageDelete {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border: 1px solid rgba(255, 42, 42, 0.3);
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.92);
+  color: #FF2A2A;
+  box-shadow: 0 2px 6px rgba(81, 60, 44, 0.12);
+}
+
+.canvasToggleActive {
+  color: white;
+  background: rgba(82, 85, 74, 0.82);
+}
+
+.renamePageButton {
+  color: #55564c;
+}
+
+.renamePageButton:hover {
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.renameInput {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid rgba(64, 66, 55, 0.3);
+  background: transparent;
+  padding: 7px 0;
+  color: #36372f;
+  font-size: 14px;
+  outline: none;
+}
+
+.renameInput:focus {
+  border-color: #176bff;
+}
+
+.dialogSecondary,
+.dialogPrimary {
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.dialogSecondary {
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.26);
+  color: #56574e;
+}
+
+.dialogPrimary {
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  background: rgba(83, 85, 73, 0.78);
+  color: white;
+}
+
+.deleteAction {
+  color: #FF2A2A;
+}
+
+.overlayPanel {
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  background: rgba(250, 248, 229, 0.7);
+  box-shadow: 0 12px 28px rgba(75, 69, 42, 0.14);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.modalAction {
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  background: rgba(87, 89, 77, 0.76);
+  color: white;
+  box-shadow: 0 5px 14px rgba(68, 63, 42, 0.13);
+}
+
+.modalAction:hover {
+  background: rgba(65, 68, 56, 0.88);
+}
+
+.modalDanger {
+  border-color: rgba(255, 42, 42, 0.36);
+  background: rgba(255, 42, 42, 0.10);
+  color: #FF2A2A;
+}
+
+.modalDanger:hover {
+  background: rgba(255, 42, 42, 0.17);
+}
+
+.notice {
+  color: var(--xoom-muted);
+}
+
+.toast {
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  background: rgba(251, 248, 221, 0.86);
+  color: var(--xoom-ink);
+  box-shadow: 0 8px 22px rgba(75, 69, 42, 0.12);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.toastError {
+  border-color: rgba(255, 42, 42, 0.25);
+  color: #a82424;
+}
+
+.unavailable {
+  min-height: 100dvh;
+  color: var(--xoom-ink);
+  background-color: #fbf8dc;
+  background-image: radial-gradient(circle, rgba(77, 78, 62, 0.22) 1px, transparent 1.15px);
+  background-size: 24px 24px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room *, .unavailable * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 639px) {
+  .roomHeader {
+    gap: 6px;
+  }
+
+  .categoryRail {
+    top: auto;
+    bottom: 64px;
+    flex-direction: row;
+    transform: none;
+  }
+
+  .categoryButton {
+    width: 32px;
+    height: 32px;
+  }
+
+  .categoryCount {
+    top: -3px;
+    right: -3px;
+  }
+
+  .renamePageButton {
+    top: 58px;
+  }
+}

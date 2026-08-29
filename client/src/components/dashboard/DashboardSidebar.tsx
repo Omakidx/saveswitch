@@ -622,7 +622,7 @@ function SidebarDateEntry({
           
           <button
             type="button"
-            className="group flex items-center gap-2.5 px-3 py-2 text-sm text-red-400 hover:bg-red-600 hover:text-white rounded-lg transition-all duration-200 border-none bg-transparent cursor-pointer text-left w-full font-arimo"
+            className="group flex items-center gap-2.5 px-3 py-2 text-sm text-[#FF2A2A] hover:bg-[#FF2A2A]/10 hover:text-[#FF2A2A] rounded-lg transition-all duration-200 border-none bg-transparent cursor-pointer text-left w-full font-arimo"
             onClick={() => {
               onDeletePage(contextMenu.pageId);
               setContextMenu(null);
@@ -634,7 +634,7 @@ function SidebarDateEntry({
               alt="" 
               width={14} 
               height={14} 
-              className="delete-context-icon opacity-80 group-hover:opacity-100 transition-all duration-200" 
+              className="opacity-80 group-hover:opacity-100 transition-all duration-200"
             />
             Delete
           </button>
@@ -643,7 +643,7 @@ function SidebarDateEntry({
 
       <style dangerouslySetInnerHTML={{__html: `
         .delete-context-icon { filter: brightness(0) invert(0.6) sepia(1) saturate(5) hue-rotate(-50deg); }
-        .group:hover .delete-context-icon { filter: brightness(0) invert(1); }
+        .group:hover .delete-context-icon { filter: brightness(0) invert(0.82); }
       `}} />
     </div>
   );

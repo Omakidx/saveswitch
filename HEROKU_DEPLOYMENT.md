@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This is the CLI-first Heroku deployment path for Saveswitch. It assumes the production credentials already live in the root `.env.local` file and that you want to deploy the current split app without moving code around.
+This is the CLI-first Heroku deployment path for Saveswitch. The existing Heroku apps are the release source of truth for runtime configuration. Only the explicit `config` action reads a local `.env.local` file; preflight, smoke checks, schema work, and image releases use the existing app configuration without printing secrets.
 
 Saveswitch should run as two Heroku apps:
 
@@ -11,11 +11,11 @@ Saveswitch should run as two Heroku apps:
 | `saveswitch-api` | `server/` | Bun + Elysia | REST API, Google OAuth callback, WebSocket sync, database access |
 | `saveswitch-web` | `client/` | Bun + Next.js | UI, dashboard, Xoomshare pages, login/register |
 
-The guide uses the Heroku CLI plus Heroku remote Docker builds. That fits this repo because both apps are Bun-first and live in subdirectories, and it does not require Docker to be installed locally. The repo now includes the deploy helper and container files:
+The guide uses the Heroku CLI plus remote container builds from the API and web subtrees. That keeps the Bun-first apps in their subdirectories and does not require local Docker daemon access. The repo includes the deploy helper and container files:
 
 | File | Purpose |
 |------|---------|
-| `scripts/deploy-heroku.sh` | Loads `.env.local`, pushes config vars, builds images, releases apps, and runs smoke checks. |
+| `scripts/deploy-heroku.sh` | Validates the production contract, pushes config vars, builds images, releases apps, and runs smoke checks. |
 | `server/Dockerfile` | Builds the Bun/Elysia API image. |
 | `client/Dockerfile` | Builds the Bun/Next.js web image with production `NEXT_PUBLIC_*` values. |
 | `server/.dockerignore`, `client/.dockerignore` | Keeps local env files and build output out of container contexts. |
@@ -86,7 +86,6 @@ Log in to Heroku and the container registry:
 
 ```bash
 heroku login
-heroku container:login
 ```
 
 Load `.env.local` in your shell:
@@ -127,9 +126,10 @@ After the prerequisites are installed and you are logged in, the deploy can be r
 
 ```bash
 bash scripts/deploy-heroku.sh create
+bash scripts/deploy-heroku.sh preflight
 bash scripts/deploy-heroku.sh config
 bash scripts/deploy-heroku.sh schema
-bash scripts/deploy-heroku.sh all
+bash scripts/deploy-heroku.sh release
 ```
 
 What each command does:
@@ -137,9 +137,11 @@ What each command does:
 | Command | Action |
 |---------|--------|
 | `create` | Creates both Heroku apps or sets the container stack if they already exist. |
+| `preflight` | Checks required values, rejects local or mismatched production URLs, and verifies both target apps. |
 | `config` | Pushes API and web config vars from `.env.local`. |
 | `schema` | Runs `bunx drizzle-kit push` against `DATABASE_URL`. |
-| `all` | Runs `config`, deploys API, deploys web, then runs smoke checks. |
+| `release` | Runs `preflight`, deploys the API and web subtrees, and runs smoke checks using the existing Heroku configuration. |
+| `all` | Runs `preflight`, configures the apps from `.env.local`, deploys the API and web subtrees, then runs smoke checks. It intentionally does not change the database schema. |
 
 Use the manual sections below when you want to inspect or run one step at a time.
 
@@ -239,6 +241,8 @@ FROM oven/bun:1
 
 WORKDIR /app
 
+ENV NODE_ENV=production
+
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
@@ -280,6 +284,8 @@ CMD bun --bun next start -p ${PORT:-5173}
 
 Use this `CMD` instead of the current `client/package.json` `start` script on Heroku. The package script points to `../.env.local` and hardcodes port `5173`, while Heroku requires the app to listen on `$PORT`.
 
+`NEXT_PUBLIC_*` values are compiled into the Next.js bundle. For the supported remote-build release path, the two API values in `client/heroku.yml` must match the public API configuration already on `saveswitch-web`; preflight checks this before a release. The current OAuth redirect login does not consume `NEXT_PUBLIC_GOOGLE_CLIENT_ID`; retain it only for a deliberate future One Tap integration.
+
 ### 8.3 Docker Ignore Files
 
 `server/.dockerignore`:
@@ -314,25 +320,25 @@ test -n "$API_URL"
 test -n "$PUBLIC_GOOGLE_CLIENT_ID"
 ```
 
-Make sure the deployment files are committed before pushing subtrees:
+Make sure the exact release source, including deployment files, is committed to GitHub before building the containers:
 
 ```bash
 git status --short
 ```
 
-Deploy the API with a Heroku remote Docker build:
+Deploy the API with a Heroku remote container build:
 
 ```bash
 git subtree push --prefix server "https://git.heroku.com/$API_APP.git" main
 ```
 
-Deploy the web app with a Heroku remote Docker build:
+Deploy the web app with a Heroku remote container build:
 
 ```bash
 git subtree push --prefix client "https://git.heroku.com/$WEB_APP.git" main
 ```
 
-Why `client/heroku.yml` matters: `NEXT_PUBLIC_*` values are compiled into the Next.js client bundle. If `NEXT_PUBLIC_API_BASE` changes, update `client/heroku.yml`, commit it, and redeploy the web app.
+`client/heroku.yml` is part of the supported release path. If the public API domain changes, update its two `NEXT_PUBLIC_*` values, commit the change, and verify preflight before releasing the web app.
 
 ---
 
@@ -357,7 +363,7 @@ cd server
 bunx drizzle-kit push
 ```
 
-This uses `DATABASE_URL` from `.env.local`. Treat this as a production database change: review schema diffs and take a backup before applying risky changes.
+This uses `DATABASE_URL` from `.env.local`. Treat this as a production database change: review schema diffs, take a backup, and apply it before the compatible API release. `drizzle-kit push` does not substitute for reviewing any hand-authored/backfill SQL in `server/drizzle/`; run such migration files only after their exact effect and rollback compatibility have been reviewed.
 
 If you decide to use Heroku Postgres instead of Neon:
 
@@ -379,7 +385,7 @@ After each deploy:
 heroku ps --app "$API_APP"
 heroku ps --app "$WEB_APP"
 curl "$API_URL/health"
-heroku open --app "$WEB_APP"
+curl --fail --silent --show-error "$WEB_URL/login" >/dev/null
 ```
 
 Manual checks:
@@ -441,7 +447,7 @@ The web app is easier to scale horizontally because it does not own room state.
 | Browser CORS error | `CLIENT_ORIGIN` does not equal the web origin | Update `.env.local`, rerun API config, restart API. |
 | Google redirect mismatch | Google Console and `GOOGLE_REDIRECT_URI` disagree | Update Google Console and rerun section 6. |
 | One Tap missing | Missing `NEXT_PUBLIC_GOOGLE_CLIENT_ID` at build time | Reload env, rebuild, redeploy the web image. |
-| Client calls localhost | Web image was built without the production API URL | Update `client/heroku.yml`, commit it, and redeploy web. |
+| Client calls localhost | Web image was built without the production API URL | Update `client/heroku.yml` to match the active web config, commit it, then run preflight and release the web app. |
 | Next app fails to bind | It is not listening on Heroku's `$PORT` | Use the Docker `CMD` from section 8.2. |
 | Image upload fails | Cloudinary value is wrong or lacks upload permission | Verify `CLOUDINARY_URL` and API key permissions. |
 | WebSocket sync works in one tab but not another user/session | API was scaled across dynos without shared pub/sub | Scale API back to one dyno or add shared fanout. |
@@ -455,6 +461,7 @@ The web app is easier to scale horizontally because it does not own room state.
 - [ ] Heroku CLI is logged in.
 - [ ] Heroku browser login succeeded.
 - [ ] Heroku config vars were pushed from `.env.local`.
+- [ ] `bash scripts/deploy-heroku.sh preflight` passed against `saveswitch-api` and `saveswitch-web`.
 - [ ] Google OAuth origin and redirect URI match production.
 - [ ] `server/Dockerfile` and `client/Dockerfile` exist.
 - [ ] Database schema has been applied.
@@ -471,11 +478,13 @@ The deploy helper supports focused actions:
 
 ```bash
 bash scripts/deploy-heroku.sh create
+bash scripts/deploy-heroku.sh preflight
 bash scripts/deploy-heroku.sh config
 bash scripts/deploy-heroku.sh api
 bash scripts/deploy-heroku.sh web
 bash scripts/deploy-heroku.sh schema
 bash scripts/deploy-heroku.sh smoke
+bash scripts/deploy-heroku.sh release
 bash scripts/deploy-heroku.sh all
 ```
 
@@ -484,5 +493,5 @@ The script does the same core work as the manual sections:
 1. Load `.env.local`.
 2. Derive `API_APP`, `WEB_APP`, `API_URL`, `WEB_URL`, and `PUBLIC_GOOGLE_CLIENT_ID`.
 3. Push Heroku config vars.
-4. Push the selected subtree so Heroku builds and releases the image remotely.
+4. Build and push the selected container, then release the immutable image on its target app.
 5. Run the smoke-test commands.

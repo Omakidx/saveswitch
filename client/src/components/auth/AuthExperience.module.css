@@ -1,0 +1,143 @@
+.page {
+  --bg: #0b0b0b; --surface: #121212; --panel: #191919; --fg: #f7f7f3;
+  --muted: #a4a4a0; --faint: #666662; --line: #2d2d2a; --inverse: #f7f7f3;
+  --inverseText: #111111; --focus: #ffffff;
+  display: grid; min-height: 100dvh; overflow: hidden; color: var(--fg); background: var(--bg);
+  font-family: var(--font-inter), Arial, sans-serif; grid-template-columns: minmax(0, 1.06fr) minmax(460px, .94fr);
+}
+.page[data-theme="light"] {
+  --bg: #f7f7f3; --surface: #ffffff; --panel: #eeeeea; --fg: #111111;
+  --muted: #62625e; --faint: #858581; --line: #d9d9d4; --inverse: #151515;
+  --inverseText: #ffffff; --focus: #171717;
+}
+.story { position: relative; z-index: 0; display: flex; min-height: 100dvh; padding: clamp(1.5rem, 3.5vw, 3.75rem); overflow: hidden; color: var(--inverseText); background: var(--inverse); flex-direction: column; }
+.story::before { position: absolute; z-index: -1; inset: 0; opacity: .16; background-image: radial-gradient(currentColor .65px, transparent .65px); background-size: 8px 8px; content: ""; mask-image: linear-gradient(135deg, black, transparent 76%); }
+.storyHeader, .mobileHeader { display: flex; align-items: center; justify-content: space-between; }
+.brand { display: inline-flex; align-items: center; gap: .6rem; color: inherit; font-size: .96rem; font-weight: 700; letter-spacing: -.045em; text-decoration: none; }
+.brandGlyph { display: grid; width: 1.75rem; height: 1.75rem; color: var(--inverse); background: var(--inverseText); border-radius: .5rem; font-family: Georgia, serif; font-size: 1.2rem; font-style: italic; place-items: center; }
+.sync { display: inline-flex; align-items: center; gap: .4rem; padding: .45rem .65rem; border: 1px solid color-mix(in srgb, var(--inverseText) 22%, transparent); border-radius: 999px; color: color-mix(in srgb, var(--inverseText) 78%, transparent); font-size: .7rem; font-weight: 650; letter-spacing: .03em; }
+.sync i { width: .4rem; height: .4rem; background: var(--inverseText); border-radius: 50%; }
+.storyBody { width: min(100%, 36rem); margin: auto 0; padding: 4rem 0 3rem; }
+.kicker { margin: 0 0 1rem; color: var(--muted); font-size: .73rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.story .kicker { color: color-mix(in srgb, var(--inverseText) 56%, transparent); }
+.story h2 { max-width: 9ch; margin: 0; font-size: clamp(2.65rem, 5.1vw, 5.6rem); font-weight: 500; letter-spacing: -.075em; line-height: .92; }
+.storyBody > p:not(.kicker) { max-width: 31rem; margin: 1.5rem 0 0; color: color-mix(in srgb, var(--inverseText) 62%, transparent); font-size: clamp(.95rem, 1.3vw, 1.08rem); line-height: 1.65; }
+.storyFooter { margin: 0; color: color-mix(in srgb, var(--inverseText) 46%, transparent); font-size: .78rem; }
+.deviceScene { position: relative; width: min(100%, 34rem); height: clamp(14rem, 28vw, 21rem); margin-top: clamp(2.5rem, 6vw, 5.5rem); }
+.desktop, .phone { position: absolute; border: 1px solid color-mix(in srgb, var(--inverseText) 32%, transparent); box-shadow: 0 1.2rem 4rem rgba(0,0,0,.2); }
+.desktop { top: 0; left: 0; width: min(75%, 26rem); height: min(75%, 15rem); overflow: hidden; background: color-mix(in srgb, var(--inverseText) 8%, transparent); border-radius: .85rem; transform: rotate(-4deg); }
+.browserDots { display: flex; gap: .28rem; height: 1.65rem; padding: .65rem; border-bottom: 1px solid color-mix(in srgb, var(--inverseText) 16%, transparent); }
+.browserDots i { width: .34rem; height: .34rem; background: color-mix(in srgb, var(--inverseText) 44%, transparent); border-radius: 50%; }
+.desktopBody { display: grid; height: calc(100% - 1.65rem); padding: 1rem; gap: .55rem; grid-template-columns: 24% repeat(3, 1fr); }
+.desktopBody span { border-right: 1px solid color-mix(in srgb, var(--inverseText) 16%, transparent); }
+.desktopBody b { min-height: 3.4rem; background: color-mix(in srgb, var(--inverseText) 14%, transparent); border: 1px solid color-mix(in srgb, var(--inverseText) 18%, transparent); border-radius: .4rem; }
+.phone { right: 5%; bottom: 0; display: flex; width: clamp(7.25rem, 16vw, 10rem); height: clamp(12rem, 22vw, 16.5rem); padding: 2rem 1rem 1rem; background: var(--inverse); border-radius: 1.3rem; flex-direction: column; align-items: center; transform: rotate(8deg); }
+.phone > i { position: absolute; top: .72rem; width: 2.2rem; height: .28rem; background: color-mix(in srgb, var(--inverseText) 42%, transparent); border-radius: 999px; }
+.productMark { width: 2.4rem; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+.phone > div { display: grid; width: 100%; gap: .55rem; margin-top: auto; }
+.phone > div span { display: block; height: .38rem; background: color-mix(in srgb, var(--inverseText) 22%, transparent); border-radius: 999px; }
+.phone > div span:nth-child(2) { width: 72%; }.phone > div span:nth-child(3) { width: 87%; }
+.transfer { position: absolute; z-index: 2; right: 4%; bottom: 40%; display: flex; align-items: center; gap: .5rem; padding: .55rem .75rem; color: var(--inverse); background: var(--inverseText); border-radius: 999px; box-shadow: 0 .75rem 2rem rgba(0,0,0,.2); font-size: .7rem; font-weight: 700; }
+.transfer b { font-size: .9rem; }
+.action { position: relative; display: flex; min-width: 0; padding: clamp(1.5rem, 4.5vw, 5rem); background: var(--bg); flex-direction: column; align-items: center; justify-content: center; }
+.mobileHeader { display: none; }.theme { position: absolute; top: clamp(1.5rem,3.2vw,3rem); right: clamp(1.5rem,3.2vw,3rem); display: inline-flex; min-height: 2.75rem; align-items: center; gap: .5rem; padding: .55rem .75rem; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: .78rem; font-weight: 650; transition: color .16s ease, background-color .16s ease, border-color .16s ease; }
+.theme:hover { background: var(--panel); border-color: var(--faint); }.theme svg { width: 1rem; height: 1rem; fill: currentColor; stroke: none; }
+.card { width: min(100%, 29rem); }.cardMark { display: grid; width: 3rem; height: 3rem; margin-bottom: 2.2rem; color: var(--fg); border: 1px solid var(--line); border-radius: .9rem; place-items: center; }.cardMark .productMark { width: 1.65rem; }
+.card h1 { max-width: 13ch; margin: 0; font-size: clamp(2.25rem,4vw,3.6rem); font-weight: 500; letter-spacing: -.075em; line-height: .98; text-wrap: balance; }.description { max-width: 28rem; margin: 1.35rem 0 0; color: var(--muted); font-size: .98rem; line-height: 1.65; }
+.error { display: grid; gap: .35rem; margin-top: 1.5rem; padding: .85rem 1rem; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--fg); border-radius: .5rem; font-size: .82rem; line-height: 1.45; }.error span { color: var(--muted); }
+.actions { display: grid; gap: .75rem; margin-top: 2.35rem; }.button { display: grid; width: 100%; min-height: 3.6rem; padding: .75rem 1rem; color: var(--fg); border: 1px solid var(--line); border-radius: .75rem; cursor: pointer; font: inherit; font-size: .94rem; font-weight: 650; line-height: 1.2; text-decoration: none; grid-template-columns: 1.3rem 1fr 1.3rem; align-items: center; justify-items: center; transition: transform .16s ease, background-color .16s ease, border-color .16s ease, opacity .16s ease; }.button:hover { transform: translateY(-1px); }.button:active { transform: none; }.button:disabled { cursor: wait; opacity: .7; transform: none; }.button > span { text-align: center; }.button > svg { width: 1.15rem; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
+.google { color: var(--inverseText); background: var(--inverse); border-color: var(--inverse); }.google:hover { background: color-mix(in srgb, var(--inverse) 90%, var(--bg)); }.xoomshare { background: var(--surface); }.xoomshare:hover { background: var(--panel); border-color: var(--faint); }
+.crosslink { margin: 1.8rem 0 0; color: var(--muted); font-size: .84rem; line-height: 1.5; text-align: center; }.crosslink a { color: var(--fg); font-weight: 700; text-underline-offset: .2em; }.note { position: absolute; bottom: clamp(1.5rem,3.2vw,3rem); margin: 0; color: var(--faint); font-size: .72rem; text-align: center; }
+.page :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+@media (max-width: 920px) { .page { grid-template-columns: minmax(0,1fr) minmax(400px,.9fr); }.story { padding: 2rem; }.story h2 { font-size: clamp(2.6rem,5vw,4.4rem); }.deviceScene { height: 15rem; } }
+@media (max-width: 760px) {
+  .page { display: block; }
+  .story { display: none; }
+  .action {
+    min-height: 100dvh;
+    padding: 6.5rem clamp(1.25rem, 7vw, 2rem) 5.5rem;
+    align-items: stretch;
+  }
+  .mobileHeader {
+    position: absolute;
+    top: 1.5rem;
+    left: clamp(1.25rem, 7vw, 2rem);
+    display: flex;
+    color: var(--fg);
+  }
+  .mobileHeader .brand span:last-child { display: none; }
+  .theme {
+    top: 1.3rem;
+    right: clamp(1.25rem, 7vw, 2rem);
+  }
+  .card {
+    width: 100%;
+    max-width: 31rem;
+    margin: auto;
+  }
+  .note {
+    right: 1.25rem;
+    bottom: 1.25rem;
+    left: 1.25rem;
+  }
+}
+@media (max-width: 390px) { .action { padding-top: 5.75rem; }.cardMark { width: 2.7rem; height: 2.7rem; margin-bottom: 1.25rem; }.card h1 { font-size: 2.2rem; }.description { margin-top: 1rem; font-size: .9rem; }.actions { margin-top: 1.65rem; } }
+@media (prefers-reduced-motion: reduce) { .theme, .button { transition: none; } }
+
+/* Compact auth surface: two centered authentication actions, without a split layout. */
+.page { display: grid; grid-template-columns: 1fr; place-items: center; }
+.story, .mobileHeader, .cardMark, .card > .kicker, .description, .crosslink, .note { display: none; }
+.action { display: grid; width: 100%; min-height: 100dvh; padding: 1.25rem; place-items: center; }
+.card { width: min(13rem, calc(100vw - 2.5rem)); }
+.card h1 { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.actions { gap: .45rem; margin: 0; }
+.button {
+  min-height: 2.375rem;
+  padding: .45rem .7rem;
+  border-radius: 999px;
+  font-size: .75rem;
+  grid-template-columns: 1rem 1fr 1rem;
+  backdrop-filter: blur(18px) saturate(165%);
+  -webkit-backdrop-filter: blur(18px) saturate(165%);
+}
+.button img { width: .875rem; height: .875rem; }
+.button > svg { display: none; }
+.button::after { width: 1rem; content: ""; }
+.google, .xoomshare { color: var(--fg); background: linear-gradient(135deg, color-mix(in srgb, var(--fg) 14%, transparent), color-mix(in srgb, var(--fg) 5%, transparent)); border-color: color-mix(in srgb, var(--fg) 20%, transparent); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 28%, transparent), inset 0 -1px 0 color-mix(in srgb, var(--bg) 38%, transparent), 0 .5rem 1.6rem rgba(0, 0, 0, .14); }
+.google:hover, .xoomshare:hover { background: linear-gradient(135deg, color-mix(in srgb, var(--fg) 20%, transparent), color-mix(in srgb, var(--fg) 8%, transparent)); border-color: color-mix(in srgb, var(--fg) 30%, transparent); }
+.theme { top: 1.25rem; right: 1.25rem; width: 2.25rem; min-height: 2.25rem; padding: 0; border-radius: 50%; place-content: center; }
+.theme span { display: none; }
+.error { margin: 0 0 .75rem; text-align: center; }
+
+/* Supplied monochrome halftone artwork, with theme-aware contrast control. */
+.page::before { position: fixed; z-index: 0; inset: 0; background: url("/images/login/auth-halftone-background.png") center / cover no-repeat; content: ""; opacity: .72; filter: brightness(.68) contrast(1.08); pointer-events: none; }
+.page::after { position: fixed; z-index: 0; inset: 0; background: radial-gradient(circle at center, rgba(10, 10, 10, .1), rgba(10, 10, 10, .38) 48%, rgba(10, 10, 10, .62)); content: ""; pointer-events: none; }
+.page[data-theme="light"]::before { opacity: .48; filter: invert(1) brightness(1.05) contrast(.9); }
+.page[data-theme="light"]::after { background: radial-gradient(circle at center, rgba(247, 247, 243, .2), rgba(247, 247, 243, .52) 52%, rgba(247, 247, 243, .78)); }
+.action { z-index: 1; background: transparent; }
+.theme { z-index: 2; }
+
+/* Give the Xoomshare mark more presence while preserving centered labels. */
+.button { grid-template-columns: 1.125rem 1fr 1.125rem; }
+.button::after { width: 1.125rem; }
+.xoomshare img { width: 1.125rem; height: 1.125rem; }
+.page[data-theme="dark"] .xoomshare img { filter: brightness(0) invert(1); }
+
+/* A quiet route heading above the compact authentication choices. */
+.card h1 {
+  position: static;
+  width: min(17rem, calc(100vw - 2.5rem));
+  height: auto;
+  margin: 0 0 1rem 50%;
+  overflow: visible;
+  clip: auto;
+  white-space: pre-line;
+  max-width: none;
+  transform: translateX(-50%);
+  font-size: clamp(1.75rem, 3vw, 2.15rem);
+  font-weight: 800;
+  letter-spacing: -.065em;
+  line-height: .98;
+  text-align: center;
+  text-wrap: nowrap;
+}

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { boolean, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: text('id').primaryKey(), // using Google sub ID which is a string
@@ -20,11 +20,14 @@ export const pages = pgTable('pages', {
   sessionId: text('session_id'),
   expiresAt: timestamp('expires_at'),
   allowGuestResources: boolean('allow_guest_resources').default(false).notNull(),
+  resourceCount: integer('xoomshare_resource_count').default(0).notNull(),
+  resourceBytes: integer('xoomshare_resource_bytes').default(0).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
   uniqueIndex('pages_path_code_unique')
     .on(table.pathCode)
     .where(sql`${table.pathCode} is not null`),
+  index('pages_session_id_idx').on(table.sessionId),
 ]);
 
 export const resources = pgTable('resources', {
@@ -39,6 +42,25 @@ export const resources = pgTable('resources', {
   y: integer('y').default(0).notNull(), // Y coordinate for freeform canvas
   zIndex: integer('z_index').default(1).notNull(), // Z-index for stacking
   rotation: integer('rotation').default(0).notNull(), // Rotation angle
-  sessionId: text('session_id'), // Track which session/device created this resource
+  sessionId: text('session_id'), // Opaque Xoomshare room-participant id (or null for legacy resources)
+  sizeBytes: integer('size_bytes').default(0).notNull(),
+  providerPublicId: text('provider_public_id'),
+  providerResourceType: text('provider_resource_type', { enum: ['image', 'raw'] }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (table) => [
+  index('resources_page_id_idx').on(table.pageId),
+]);
+
+/** Durable cleanup work for Cloudinary assets after the referring row is gone. */
+export const assetDeletionQueue = pgTable('asset_deletion_queue', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  providerPublicId: text('provider_public_id').notNull(),
+  providerResourceType: text('provider_resource_type', { enum: ['image', 'raw'] }).notNull(),
+  attempts: integer('attempts').default(0).notNull(),
+  lastError: text('last_error'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('asset_deletion_queue_provider_public_id_unique').on(table.providerPublicId),
+  index('asset_deletion_queue_created_at_idx').on(table.createdAt),
+]);

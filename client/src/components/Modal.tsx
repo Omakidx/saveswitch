@@ -78,7 +78,7 @@ export default function Modal({
                 onClick={onConfirm}
                 className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-all shadow-md hover:shadow-lg active:scale-95 border-none ${
                   isDanger
-                    ? "bg-red-600 hover:bg-red-700 text-white"
+                    ? "border border-[#FF2A2A]/30 bg-[#FF2A2A]/10 text-[#FF2A2A] hover:bg-[#FF2A2A]/15"
                     : "bg-white text-black hover:bg-gray-200"
                 }`}
               >
@@ -89,7 +89,6 @@ export default function Modal({
                     alt=""
                     width={16}
                     height={16}
-                    style={{ filter: "brightness(0) invert(1)" }}
                   />
                 )}
                 {confirmText}

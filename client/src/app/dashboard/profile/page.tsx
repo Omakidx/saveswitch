@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import Modal from "@/components/Modal";
-import LoadingSpinner from "@/components/LoadingSpinner";
 import { API_BASE } from "@/lib/api";
+import styles from "./ProfilePage.module.css";
+
 const MAX_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_PROFILE_IMAGE_TYPES = new Set([
   "image/png",
@@ -12,6 +12,9 @@ const ALLOWED_PROFILE_IMAGE_TYPES = new Set([
   "image/webp",
   "image/gif",
 ]);
+
+type UsernameStatus = "idle" | "checking" | "available" | "taken" | "invalid";
+type Notice = { tone: "success" | "error"; message: string } | null;
 
 interface User {
   id: string;
@@ -21,367 +24,440 @@ interface User {
   username: string | null;
 }
 
+function normaliseUsername(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function validateUsername(value: string) {
+  if (value.length < 3 || value.length > 20) {
+    return "Username must be between 3 and 20 characters.";
+  }
+
+  if (!/^[a-z0-9_]+$/.test(value)) {
+    return "Only lowercase letters, numbers, and underscores.";
+  }
+
+  return null;
+}
+
+function profileGradient(seed: string) {
+  let value = 0;
+  for (let index = 0; index < seed.length; index += 1) {
+    value = (value << 5) - value + seed.charCodeAt(index);
+    value |= 0;
+  }
+
+  const hue = Math.abs(value) % 360;
+  return {
+    background: `radial-gradient(circle at 25% 25%, hsl(${hue} 88% 76%), transparent 42%), radial-gradient(circle at 76% 72%, hsl(${(hue + 98) % 360} 78% 67%), transparent 48%), linear-gradient(135deg, hsl(${(hue + 36) % 360} 74% 70%), hsl(${(hue + 172) % 360} 68% 62%))`,
+  };
+}
+
+function BackIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5 7.5 12l7 7" /></svg>;
+}
+
+function CameraIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 8.5h3l1.25-2h6.5l1.25 2h3A1.5 1.5 0 0 1 21 10v7.5A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5V10a1.5 1.5 0 0 1 1.5-1.5Z" /><circle cx="12" cy="13" r="3.25" /></svg>;
+}
+
+function LogOutIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H6.5A2.5 2.5 0 0 0 4 7.5v9A2.5 2.5 0 0 0 6.5 19H10" /><path d="m14 8 4 4-4 4M18 12H9" /></svg>;
+}
+
 export default function ProfilePage() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [modalState, setModalState] = useState<{ isOpen: boolean; title: string; message: string }>({ isOpen: false, title: "", message: "" });
+  const [signingOut, setSigningOut] = useState(false);
+  const [notice, setNotice] = useState<Notice>(null);
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
   const [originalUsername, setOriginalUsername] = useState("");
-  const [usernameStatus, setUsernameStatus] = useState<"idle" | "checking" | "available" | "taken" | "invalid">("idle");
+  const [usernameStatus, setUsernameStatus] = useState<UsernameStatus>("idle");
   const [usernameMessage, setUsernameMessage] = useState("");
   const [picture, setPicture] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const usernameAbortRef = useRef<AbortController | null>(null);
+  const usernameRequestRef = useRef(0);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    async function fetchUser() {
-      try {
-        const res = await fetch(`${API_BASE}/auth/me`, {
-          credentials: "include",
-        });
-        const data = await res.json();
-        if (data.authenticated && data.user) {
-          setUser(data.user);
-          setName(data.user.name);
-          setPicture(data.user.picture);
-          if (data.user.username) {
-            setUsername(data.user.username);
-            setOriginalUsername(data.user.username);
-          }
-        } else {
-          router.push("/login");
-        }
-      } catch (err) {
-        console.error("Error fetching user", err);
-      } finally {
-        setLoading(false);
+  const showNotice = useCallback((nextNotice: Exclude<Notice, null>) => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    setNotice(nextNotice);
+    noticeTimerRef.current = setTimeout(() => setNotice(null), 5000);
+  }, []);
+
+  const loadUser = useCallback(async () => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+    setLoading(true);
+    setLoadError(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/auth/me`, {
+        credentials: "include",
+        signal: controller.signal,
+      });
+
+      if (!response.ok) throw new Error("Unable to load your profile right now.");
+      const data = await response.json();
+
+      if (!data.authenticated || !data.user) {
+        router.replace("/login");
+        return;
       }
+
+      const nextUser = data.user as User;
+      setUser(nextUser);
+      setName(nextUser.name ?? "");
+      setPicture(nextUser.picture ?? "");
+      const nextUsername = normaliseUsername(nextUser.username);
+      setUsername(nextUsername);
+      setOriginalUsername(nextUsername);
+      setUsernameStatus("idle");
+      setUsernameMessage("");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setLoadError(error instanceof Error ? error.message : "Unable to load your profile right now.");
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
     }
-    fetchUser();
   }, [router]);
 
   useEffect(() => {
-    const trimmedUsername = username.trim();
-    const normalizedUsername = trimmedUsername.toLowerCase();
+    const initialLoad = setTimeout(() => {
+      void loadUser();
+    }, 0);
+    return () => {
+      clearTimeout(initialLoad);
+      loadAbortRef.current?.abort();
+      usernameAbortRef.current?.abort();
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    };
+  }, [loadUser]);
 
-    const delayDebounceFn = setTimeout(async () => {
-      if (!trimmedUsername || username === originalUsername) {
+  useEffect(() => {
+    const normalised = normaliseUsername(username);
+    const original = normaliseUsername(originalUsername);
+    usernameAbortRef.current?.abort();
+    usernameRequestRef.current += 1;
+    const requestId = usernameRequestRef.current;
+
+    if (!normalised || normalised === original) {
+      const resetStatus = setTimeout(() => {
+        if (requestId !== usernameRequestRef.current) return;
         setUsernameStatus("idle");
         setUsernameMessage("");
-        return;
-      }
+      }, 0);
+      return () => clearTimeout(resetStatus);
+    }
 
-      if (trimmedUsername.length < 3 || trimmedUsername.length > 20) {
+    const validationError = validateUsername(normalised);
+    if (validationError) {
+      const setInvalidStatus = setTimeout(() => {
+        if (requestId !== usernameRequestRef.current) return;
         setUsernameStatus("invalid");
-        setUsernameMessage("Username must be between 3 and 20 characters.");
-        return;
-      }
+        setUsernameMessage(validationError);
+      }, 0);
+      return () => clearTimeout(setInvalidStatus);
+    }
 
-      if (!/^[a-z0-9_]+$/.test(normalizedUsername)) {
-        setUsernameStatus("invalid");
-        setUsernameMessage("Only lowercase letters, numbers, and underscores.");
-        return;
-      }
-
+    const controller = new AbortController();
+    const timeout = setTimeout(async () => {
       setUsernameStatus("checking");
-      setUsernameMessage("Checking availability...");
+      setUsernameMessage("Checking availability…");
       try {
-        const res = await fetch(`${API_BASE}/users/check-username?username=${encodeURIComponent(trimmedUsername)}`, {
+        const response = await fetch(`${API_BASE}/users/check-username?username=${encodeURIComponent(normalised)}`, {
           credentials: "include",
+          signal: controller.signal,
         });
-        const data = await res.json();
-        
+        const data = await response.json();
+        if (requestId !== usernameRequestRef.current) return;
+
         if (data.available) {
           setUsernameStatus("available");
-          setUsernameMessage("Username is available!");
+          setUsernameMessage("Username is available.");
         } else {
           setUsernameStatus("taken");
           setUsernameMessage(data.error || "Username is already taken.");
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (requestId !== usernameRequestRef.current) return;
         setUsernameStatus("idle");
-        setUsernameMessage("");
+        setUsernameMessage("Couldn’t check availability. Try again before saving.");
       }
-    }, 500);
+    }, 420);
 
-    return () => clearTimeout(delayDebounceFn);
+    usernameAbortRef.current = controller;
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
   }, [username, originalUsername]);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (!ALLOWED_PROFILE_IMAGE_TYPES.has(file.type)) {
-        setModalState({
-          isOpen: true,
-          title: "Unsupported Image",
-          message: "Please choose a PNG, JPG, WebP, or GIF image.",
-        });
-        e.target.value = "";
-        return;
-      }
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-      if (file.size > MAX_PROFILE_IMAGE_BYTES) {
-        setModalState({
-          isOpen: true,
-          title: "Image Too Large",
-          message: "Please choose an image smaller than 5MB.",
-        });
-        e.target.value = "";
-        return;
-      }
-
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setPicture(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+    if (!ALLOWED_PROFILE_IMAGE_TYPES.has(file.type)) {
+      showNotice({ tone: "error", message: "Please choose a PNG, JPG, WebP, or GIF image." });
+      event.target.value = "";
+      return;
     }
+
+    if (file.size > MAX_PROFILE_IMAGE_BYTES) {
+      showNotice({ tone: "error", message: "Please choose an image smaller than 5MB." });
+      event.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => setPicture(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => showNotice({ tone: "error", message: "That image could not be read. Please try another file." });
+    reader.readAsDataURL(file);
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
+  const currentUsername = normaliseUsername(username);
+  const originalNormalisedUsername = normaliseUsername(originalUsername);
+  const usernameChanged = currentUsername !== originalNormalisedUsername;
+  const usernameValidationError = currentUsername ? validateUsername(currentUsername) : null;
+  const nameIsValid = Boolean(name.trim());
+  const usernameReady = !usernameChanged || (!usernameValidationError && usernameStatus === "available");
+  const hasChanges = Boolean(user) && (
+    name.trim() !== user?.name ||
+    picture !== user?.picture ||
+    usernameChanged
+  );
+
+  const handleSave = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!user) return;
+
+    if (!nameIsValid) {
+      showNotice({ tone: "error", message: "Display name is required." });
+      return;
+    }
+
+    if (usernameChanged && !currentUsername) {
+      setUsernameStatus("invalid");
+      setUsernameMessage("A username can’t be cleared once set.");
+      return;
+    }
+
+    if (usernameValidationError || !usernameReady) {
+      setUsernameStatus(usernameValidationError ? "invalid" : usernameStatus);
+      setUsernameMessage(usernameValidationError ?? "Finish checking username availability before saving.");
+      return;
+    }
+
+    const body: { name: string; picture?: string; username?: string } = { name: name.trim() };
+    if (picture !== user.picture) body.picture = picture;
+    if (usernameChanged && currentUsername) body.username = currentUsername;
 
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/users/me`, {
+      const response = await fetch(`${API_BASE}/users/me`, {
         method: "PATCH",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), picture, username: username.trim() }),
+        body: JSON.stringify(body),
       });
-      const data = await res.json();
-      if (data.success) {
-        setModalState({
-          isOpen: true,
-          title: "Profile Updated",
-          message: "Your profile has been saved successfully.",
-        });
-        setTimeout(() => {
-          router.push("/dashboard");
-          router.refresh();
-        }, 1500);
-      } else {
-        setModalState({
-          isOpen: true,
-          title: "Error",
-          message: data.error || "Failed to save profile",
-        });
+      const data = await response.json();
+
+      if (!response.ok || !data.success || !data.user) {
+        throw new Error(data.error || "Failed to save profile.");
       }
-    } catch (err: unknown) {
-      console.error("Error saving profile", err);
-      setModalState({
-        isOpen: true,
-        title: "Error",
-        message: err instanceof Error ? err.message : "Failed to save profile",
+
+      const canonicalUser = data.user as User;
+      setUser(canonicalUser);
+      setName(canonicalUser.name ?? "");
+      setPicture(canonicalUser.picture ?? "");
+      const canonicalUsername = normaliseUsername(canonicalUser.username);
+      setUsername(canonicalUsername);
+      setOriginalUsername(canonicalUsername);
+      setUsernameStatus("idle");
+      setUsernameMessage("");
+      showNotice({ tone: "success", message: "Profile saved." });
+      router.refresh();
+    } catch (error) {
+      showNotice({
+        tone: "error",
+        message: error instanceof Error ? error.message : "Failed to save profile.",
       });
     } finally {
       setSaving(false);
     }
   };
 
-  const hasChanges = user ? (name !== user.name || picture !== user.picture || username !== (user.username || "")) : false;
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    try {
+      const response = await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error("Couldn’t sign out right now.");
+      router.replace("/login");
+      router.refresh();
+    } catch (error) {
+      showNotice({ tone: "error", message: error instanceof Error ? error.message : "Couldn’t sign out right now." });
+      setSigningOut(false);
+    }
+  };
+
+  const fallbackGradient = useMemo(() => profileGradient(user?.id || user?.email || "saveswitch"), [user?.email, user?.id]);
 
   if (loading) {
-    return <LoadingSpinner />;
+    return (
+      <main className={styles.page} aria-busy="true">
+        <div className={styles.loadingCard} role="status">
+          <span className={styles.loadingBall} aria-hidden="true" />
+          <span>Loading your profile</span>
+        </div>
+      </main>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <main className={styles.page}>
+        <section className={styles.errorCard} role="alert">
+          <p className={styles.eyebrow}>PROFILE</p>
+          <h1>We couldn’t open your profile.</h1>
+          <p>{loadError}</p>
+          <div className={styles.errorActions}>
+            <button type="button" className={styles.primaryButton} onClick={() => void loadUser()}>Try again</button>
+            <button type="button" className={styles.quietButton} onClick={() => router.push("/dashboard")}>Back to dashboard</button>
+          </div>
+        </section>
+      </main>
+    );
   }
 
   return (
-    <>
-      <Modal
-        isOpen={modalState.isOpen}
-        title={modalState.title}
-        message={modalState.message}
-        cancelText="OK"
-        onClose={() => setModalState({ ...modalState, isOpen: false })}
-      />
-      <div className="relative flex min-h-dvh w-full items-center justify-center overflow-y-auto bg-black px-4 py-8 font-arimo">
+    <main className={styles.page}>
+      <div className={styles.orbOne} aria-hidden="true" />
+      <div className={styles.orbTwo} aria-hidden="true" />
+      <section className={styles.shell} aria-labelledby="profile-title">
+        <header className={styles.header}>
+          <button type="button" className={styles.backButton} onClick={() => router.push("/dashboard")}>
+            <BackIcon />
+            <span>Dashboard</span>
+          </button>
+          <button type="button" className={styles.signOutButton} onClick={() => void handleSignOut()} disabled={signingOut}>
+            <LogOutIcon />
+            <span>{signingOut ? "Signing out…" : "Sign out"}</span>
+          </button>
+        </header>
 
+        {notice && <div className={`${styles.notice} ${notice.tone === "error" ? styles.noticeError : styles.noticeSuccess}`} role="status">{notice.message}</div>}
 
-      <div className="relative z-10 w-full max-w-2xl px-0 sm:px-8">
-        <button
-          onClick={() => router.push("/dashboard")}
-          className="mb-6 flex items-center gap-2 text-white/60 hover:text-white transition-colors duration-200 border-none bg-transparent cursor-pointer group"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/icons/icon-chevron-down.svg"
-            alt=""
-            className="w-4 h-4 rotate-90 opacity-60 group-hover:opacity-100 transition-all duration-200"
-            style={{ filter: "brightness(0) invert(1)" }}
-          />
-          <span className="text-sm font-medium">Back to Dashboard</span>
-        </button>
-
-        <div className="flex flex-col w-full">
-          <h1 className="text-2xl font-bold text-white mb-2">Edit Profile</h1>
-          <p className="text-white/50 text-sm mb-8">
-            Update your display name and profile picture.
-          </p>
-
-          <form onSubmit={handleSave} className="mt-4 flex w-full flex-col items-center gap-8 sm:flex-row sm:items-start sm:gap-12">
-            <div className="flex-shrink-0">
-              <div
-                className="relative group cursor-pointer"
-                role="button"
-                tabIndex={0}
-                aria-label="Change profile picture"
-                onClick={() => fileInputRef.current?.click()}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    fileInputRef.current?.click();
-                  }
-                }}
-              >
-                <div className="w-32 h-32 rounded-full overflow-hidden border-2 border-white/10 relative transition-transform duration-300 group-hover:scale-105 group-active:scale-95">
-                  {picture ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={picture}
-                      alt="Profile"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src="/icons/avatar-placeholder.png"
-                      alt="Placeholder"
-                      className="w-full h-full object-cover"
-                    />
-                  )}
-                </div>
-                {/* Camera Badge */}
-                <div className="absolute bottom-0 right-0 w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-lg transition-transform duration-300 group-hover:scale-110 border border-black/10">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src="/icons/icon-camera.svg"
-                    alt="Change picture"
-                    className="w-5 h-5"
-                    style={{ filter: "brightness(0)" }}
-                  />
-                </div>
-                <input
-                  id="profile-picture"
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileChange}
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  className="hidden"
-                />
-              </div>
-            </div>
-
-            <div className="flex w-full min-w-0 flex-1 flex-col gap-6">
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor="display-name" className="text-xs font-medium text-white/70 ml-2">Display Name</label>
-                <input
-                  id="display-name"
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full bg-white/5 backdrop-blur-md border border-white/10 rounded-full px-4 py-2 text-sm text-white placeholder-white/30 outline-none focus:border-white/30 focus:bg-white/10 transition-all duration-200"
-                  placeholder="Enter your name"
-                  required
-                />
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor="username" className="text-xs font-medium text-white/70 ml-2">Username</label>
-                <div className="relative">
-                  <input
-                    id="username"
-                    type="text"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className={`w-full bg-white/5 backdrop-blur-md border rounded-full px-4 py-2 text-sm text-white placeholder-white/30 outline-none transition-all duration-200 ${
-                      usernameStatus === "invalid" || usernameStatus === "taken"
-                        ? "border-red-500/50 focus:border-red-500"
-                        : usernameStatus === "available"
-                        ? "border-green-500/50 focus:border-green-500"
-                        : "border-white/10 focus:border-white/30 focus:bg-white/10"
-                    }`}
-                    placeholder="e.g. duck_se00"
-                    pattern="^[A-Za-z0-9_]+$"
-                    title="Only letters, numbers, and underscores are allowed"
-                    minLength={3}
-                    maxLength={20}
-                    required
-                    aria-invalid={usernameStatus === "taken" || usernameStatus === "invalid"}
-                    aria-describedby={usernameMessage ? "username-status" : undefined}
-                  />
-                  {usernameStatus === "checking" && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                      <div className="animate-spin rounded-full h-3 w-3 border-t-2 border-b-2 border-white/50"></div>
-                    </div>
-                  )}
-                  {usernameStatus === "available" && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src="/icons/icon-checkmark.svg" alt="Available" className="w-4 h-4 text-green-500" style={{ filter: "invert(64%) sepia(50%) saturate(1478%) hue-rotate(85deg) brightness(97%) contrast(93%)" }} />
-                    </div>
-                  )}
-                  {(usernameStatus === "taken" || usernameStatus === "invalid") && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src="/icons/icon-error.svg" alt="Error" className="w-4 h-4 text-red-500" style={{ filter: "invert(42%) sepia(93%) saturate(1352%) hue-rotate(336deg) brightness(119%) contrast(119%)" }} />
-                    </div>
-                  )}
-                </div>
-                {usernameMessage && (
-                  <span
-                    id="username-status"
-                    className={`text-xs ml-2 mt-1 ${
-                      usernameStatus === "invalid" || usernameStatus === "taken"
-                        ? "text-red-400"
-                        : usernameStatus === "available"
-                        ? "text-green-400"
-                        : "text-white/50"
-                    }`}
-                  >
-                    {usernameMessage}
-                  </span>
-                )}
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <label htmlFor="email-address" className="text-xs font-medium text-white/70 ml-2">Email Address</label>
-                <input
-                  id="email-address"
-                  type="text"
-                  value={user?.email || ""}
-                  disabled
-                  className="w-full bg-white/5 backdrop-blur-md border border-white/5 rounded-full px-4 py-2 text-sm text-white/50 outline-none cursor-not-allowed"
-                />
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={!hasChanges || saving || usernameStatus === "taken" || usernameStatus === "invalid" || usernameStatus === "checking"}
-                  className={`inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-full border px-6 py-2 text-sm font-medium transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed sm:w-auto ${
-                    hasChanges
-                      ? "bg-white text-black border-transparent hover:bg-white/90 active:scale-[0.98]"
-                      : "bg-white/10 backdrop-blur-md border-white/20 text-white"
-                  }`}
-                >
-                  {saving ? (
-                    <>
-                      <div className={`animate-spin rounded-full h-3.5 w-3.5 border-t-2 border-b-2 ${hasChanges ? "border-black" : "border-white"}`}></div>
-                      Saving...
-                    </>
-                  ) : (
-                    "Save Changes"
-                  )}
-                </button>
-              </div>
-            </div>
-          </form>
+        <div className={styles.titleBlock}>
+          <p className={styles.eyebrow}>YOUR SPACE</p>
+          <h1 id="profile-title">Profile settings</h1>
+          <p>Keep the identity that travels with your saved spaces.</p>
         </div>
-      </div>
-      </div>
-    </>
+
+        <form className={styles.profileGrid} onSubmit={handleSave}>
+          <section className={styles.identityCard} aria-labelledby="identity-heading">
+            <div className={styles.cardHeading}>
+              <p className={styles.eyebrow}>IDENTITY</p>
+              <h2 id="identity-heading">Your presence</h2>
+            </div>
+            <div className={styles.avatarBlock}>
+              <button
+                type="button"
+                className={styles.avatarButton}
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Change profile picture"
+              >
+                <span className={styles.avatar} style={!picture ? fallbackGradient : undefined}>
+                  {picture ? (
+                    // The selected image can be a local data URL, which Next Image does not support.
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={picture} alt="Your profile" />
+                  ) : <span aria-hidden="true">{name.trim().slice(0, 1).toUpperCase() || "S"}</span>}
+                </span>
+                <span className={styles.cameraBadge}><CameraIcon /></span>
+              </button>
+              <div>
+                <p className={styles.avatarTitle}>Profile image</p>
+                <p className={styles.avatarHelp}>PNG, JPG, WebP, or GIF. Up to 5 MB.</p>
+                <button type="button" className={styles.changePhoto} onClick={() => fileInputRef.current?.click()}>Choose image</button>
+              </div>
+              <input
+                id="profile-picture"
+                ref={fileInputRef}
+                className={styles.fileInput}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                onChange={handleFileChange}
+              />
+            </div>
+          </section>
+
+          <section className={styles.formCard} aria-labelledby="details-heading">
+            <div className={styles.cardHeading}>
+              <p className={styles.eyebrow}>ACCOUNT</p>
+              <h2 id="details-heading">Personal details</h2>
+            </div>
+
+            <label className={styles.field} htmlFor="display-name">
+              <span>Display name</span>
+              <input
+                id="display-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Enter your name"
+                maxLength={120}
+                required
+              />
+            </label>
+
+            <label className={styles.field} htmlFor="username">
+              <span>Username <em>optional until you choose one</em></span>
+              <div className={styles.inputWithStatus}>
+                <input
+                  id="username"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  placeholder="e.g. duck_se00"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck="false"
+                  minLength={3}
+                  maxLength={20}
+                  aria-invalid={usernameStatus === "taken" || usernameStatus === "invalid"}
+                  aria-describedby={usernameMessage ? "username-status" : undefined}
+                  className={usernameStatus === "taken" || usernameStatus === "invalid" ? styles.inputInvalid : usernameStatus === "available" ? styles.inputAvailable : undefined}
+                />
+                {usernameStatus === "checking" && <span className={styles.fieldSpinner} aria-label="Checking username" />}
+                {usernameStatus === "available" && <span className={styles.fieldSuccess} aria-hidden="true">✓</span>}
+                {(usernameStatus === "taken" || usernameStatus === "invalid") && <span className={styles.fieldError} aria-hidden="true">!</span>}
+              </div>
+              {usernameMessage && <small id="username-status" className={usernameStatus === "taken" || usernameStatus === "invalid" ? styles.statusError : usernameStatus === "available" ? styles.statusSuccess : undefined}>{usernameMessage}</small>}
+            </label>
+
+            <label className={styles.field} htmlFor="email-address">
+              <span>Email address</span>
+              <input id="email-address" value={user?.email || ""} disabled readOnly aria-readonly="true" />
+            </label>
+
+            <div className={styles.saveRow}>
+              <p>Changes are saved to your Saveswitch account.</p>
+              <button type="submit" className={styles.primaryButton} disabled={!hasChanges || saving || !nameIsValid || !usernameReady}>
+                {saving ? <><span className={styles.buttonSpinner} aria-hidden="true" />Saving…</> : "Save changes"}
+              </button>
+            </div>
+          </section>
+        </form>
+      </section>
+    </main>
   );
 }

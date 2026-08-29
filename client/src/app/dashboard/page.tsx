@@ -1,16 +1,28 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
-import VisibilityToggle from "@/components/dashboard/VisibilityToggle";
+import { useRouter } from "next/navigation";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import CardStack from "@/components/dashboard/CardStack";
-import ResourceMiniPanel, { PageData } from "@/components/dashboard/ResourceMiniPanel";
-import FloatingActionButton from "@/components/dashboard/FloatingActionButton";
+import type { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import InfiniteCanvas, { CanvasViewState, InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
-import CategorySwitch, { Category } from "@/components/dashboard/CategorySwitch";
-import ResourceNavigator from "@/components/dashboard/ResourceNavigator";
+import type { Category } from "@/components/dashboard/CategorySwitch";
+import FigmaDashboardChrome from "@/components/dashboard/figma/FigmaDashboardChrome";
 import { API_BASE } from "@/lib/api";
+import { reconcileFetchedResources } from "./resourceReconciliation";
+import {
+  canvasViewsEqual,
+  DEFAULT_CANVAS_VIEW,
+  readDashboardState,
+  type DashboardVisibility,
+  type WorkspaceSnapshot,
+  writeDashboardState,
+} from "./dashboardState";
+import {
+  enqueueDashboardToast,
+  toastKey,
+  type DashboardToast,
+} from "./toastQueue";
 
 /* ── Types ── */
 interface User {
@@ -19,6 +31,7 @@ interface User {
   name: string;
   picture: string;
 }
+
 
 import { Resource } from "@/components/dashboard/ResourceCard";
 
@@ -35,12 +48,6 @@ interface ApiPage {
   name: string;
 }
 
-interface ToastMessage {
-  id: string;
-  message: string;
-  type: 'error' | 'success' | 'info';
-}
-
 interface ConfirmModalState {
   isOpen: boolean;
   title: string;
@@ -48,115 +55,12 @@ interface ConfirmModalState {
   onConfirm: () => void;
 }
 
-type Visibility = "private" | "public";
-
-interface WorkspaceSnapshot {
-  activePageId: string | null;
-  selectedDate: string | null;
-  expandedDates: string[];
-  isCanvasMode: boolean;
-  activeCategory: Category;
-  canvasView: CanvasViewState;
+interface ResourceMutation {
+  revision: number;
+  resource: Resource;
 }
 
-interface PersistedDashboardState {
-  visibility: Visibility;
-  workspaces: Record<Visibility, WorkspaceSnapshot>;
-}
-
-const DEFAULT_CANVAS_VIEW: CanvasViewState = {
-  offset: { x: 0, y: 0 },
-  zoom: 1,
-};
-
-const DASHBOARD_STATE_STORAGE_KEY = "saveswitch-dashboard-state";
-
-function createWorkspaceSnapshot(): WorkspaceSnapshot {
-  return {
-    activePageId: null,
-    selectedDate: null,
-    expandedDates: [],
-    isCanvasMode: false,
-    activeCategory: "target",
-    canvasView: DEFAULT_CANVAS_VIEW,
-  };
-}
-
-function createDashboardState(): PersistedDashboardState {
-  return {
-    visibility: "public",
-    workspaces: {
-      private: createWorkspaceSnapshot(),
-      public: createWorkspaceSnapshot(),
-    },
-  };
-}
-
-function isVisibility(value: unknown): value is Visibility {
-  return value === "private" || value === "public";
-}
-
-function isCanvasViewState(value: unknown): value is CanvasViewState {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<CanvasViewState>;
-  return (
-    typeof candidate.zoom === "number" &&
-    !!candidate.offset &&
-    typeof candidate.offset.x === "number" &&
-    typeof candidate.offset.y === "number"
-  );
-}
-
-function normalizeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot {
-  const fallback = createWorkspaceSnapshot();
-  if (!value || typeof value !== "object") return fallback;
-
-  const candidate = value as Partial<WorkspaceSnapshot>;
-  const activeCategory = candidate.activeCategory;
-
-  return {
-    activePageId: typeof candidate.activePageId === "string" ? candidate.activePageId : null,
-    selectedDate: typeof candidate.selectedDate === "string" ? candidate.selectedDate : null,
-    expandedDates: Array.isArray(candidate.expandedDates)
-      ? candidate.expandedDates.filter((date): date is string => typeof date === "string")
-      : [],
-    isCanvasMode: typeof candidate.isCanvasMode === "boolean" ? candidate.isCanvasMode : false,
-    activeCategory:
-      activeCategory === "target" ||
-      activeCategory === "video" ||
-      activeCategory === "image" ||
-      activeCategory === "link" ||
-      activeCategory === "document"
-        ? activeCategory
-        : "target",
-    canvasView: isCanvasViewState(candidate.canvasView) ? candidate.canvasView : DEFAULT_CANVAS_VIEW,
-  };
-}
-
-function readDashboardState(): PersistedDashboardState {
-  if (typeof window === "undefined") return createDashboardState();
-
-  try {
-    const rawState = localStorage.getItem(DASHBOARD_STATE_STORAGE_KEY);
-    if (!rawState) return createDashboardState();
-
-    const parsed = JSON.parse(rawState) as Partial<PersistedDashboardState>;
-    return {
-      visibility: isVisibility(parsed.visibility) ? parsed.visibility : "public",
-      workspaces: {
-        private: normalizeWorkspaceSnapshot(parsed.workspaces?.private),
-        public: normalizeWorkspaceSnapshot(parsed.workspaces?.public),
-      },
-    };
-  } catch {
-    return createDashboardState();
-  }
-}
-
-function writeDashboardState(state: PersistedDashboardState) {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(DASHBOARD_STATE_STORAGE_KEY, JSON.stringify(state));
-}
+type Visibility = DashboardVisibility;
 
 /* ── Helpers ── */
 function formatDateLabel(dateStr: string): string {
@@ -237,29 +141,103 @@ function getApiErrorMessage(error: unknown, fallback: string): string {
   return sanitizeErrorToast(error.trim());
 }
 
+function isAuthenticationError(error: unknown): boolean {
+  if (typeof error !== "string") return false;
+
+  const normalizedError = error.trim().toLowerCase();
+  return (
+    normalizedError === "unauthorized" ||
+    normalizedError === "invalid token" ||
+    normalizedError.includes("sign in again")
+  );
+}
+
 function shouldAutoEnterCanvasAfterCreate(): boolean {
   if (typeof window === "undefined") return true;
   return !window.matchMedia("(max-width: 639px)").matches;
 }
 
+const MAX_RESOURCE_UPLOAD_BYTES = 10 * 1024 * 1024;
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const NEW_CANVAS_COLORS = [
+  "rgba(255, 244, 210, 0.48)",
+  "rgba(222, 241, 232, 0.44)",
+  "rgba(224, 238, 255, 0.42)",
+  "rgba(244, 229, 245, 0.42)",
+];
+
+function createNewCanvasColor(): string {
+  return NEW_CANVAS_COLORS[Math.floor(Math.random() * NEW_CANVAS_COLORS.length)];
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function resourceTypeForFile(file: File): Resource["type"] {
+  if (SUPPORTED_IMAGE_MIME_TYPES.has(file.type.toLowerCase())) return "image";
+  if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) return "pdf";
+  return "file";
+}
+
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("The selected file could not be read."));
+    reader.onabort = () => reject(new Error("Reading the selected file was cancelled."));
+    reader.onload = () => typeof reader.result === "string"
+      ? resolve(reader.result)
+      : reject(new Error("The selected file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function readResourceFileContent(file: Blob, type: Resource["type"]): Promise<string> {
+  return readFileAsDataUrl(file).then((content) => type === "file"
+    ? content.replace(/^data:[^,]*,/, "data:application/octet-stream;base64,")
+    : content
+  );
+}
+
 /* ── Dashboard Page ── */
 export default function DashboardPage() {
+  const router = useRouter();
   const [initialDashboardState] = useState(readDashboardState);
   const initialWorkspaceSnapshot = initialDashboardState.workspaces[initialDashboardState.visibility];
 
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   
-  // Toasts
-  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  // Keep feedback focused: actionable errors and completed user actions, never a growing notification stack.
+  const [toasts, setToasts] = useState<DashboardToast[]>([]);
+  const toastTimersRef = useRef<Map<string, number>>(new Map());
+  const toastDedupeRef = useRef<Map<string, number>>(new Map());
 
-  const showToast = useCallback((message: string, type: ToastMessage['type'] = 'error') => {
-    const id = crypto.randomUUID();
-    const safeMessage = type === "error" ? sanitizeErrorToast(message) : message;
-    setToasts((prev) => [...prev, { id, message: safeMessage, type }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
+  const showToast = useCallback((message: string, type: DashboardToast["type"] = "error") => {
+    const safeMessage = (type === "error" ? sanitizeErrorToast(message) : message).trim();
+    if (!safeMessage) return;
+
+    const now = Date.now();
+    const key = toastKey(safeMessage, type);
+    const lastShownAt = toastDedupeRef.current.get(key);
+    if (lastShownAt && now - lastShownAt < 4500) return;
+
+    toastDedupeRef.current.set(key, now);
+    const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${now}-${Math.random()}`;
+    const toast: DashboardToast = { id, message: safeMessage, type };
+    setToasts((previous) => enqueueDashboardToast(previous, toast));
+
+    const timer = window.setTimeout(() => {
+      toastTimersRef.current.delete(id);
+      setToasts((previous) => previous.filter((item) => item.id !== id));
+      if (toastDedupeRef.current.get(key) === now) toastDedupeRef.current.delete(key);
+    }, type === "error" ? 5200 : 3200);
+    toastTimersRef.current.set(id, timer);
   }, []);
 
   // Modal
@@ -268,12 +246,6 @@ export default function DashboardPage() {
   const [visibility, setVisibility] = useState<Visibility>(initialDashboardState.visibility);
   const [selectedDate, setSelectedDate] = useState<string | null>(initialWorkspaceSnapshot.selectedDate);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set(initialWorkspaceSnapshot.expandedDates));
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window !== "undefined") {
-      return window.innerWidth < 768;
-    }
-    return false;
-  });
   const [isCanvasMode, setIsCanvasMode] = useState(initialWorkspaceSnapshot.isCanvasMode);
   const [activeCategory, setActiveCategory] = useState<Category>(initialWorkspaceSnapshot.activeCategory);
 
@@ -283,11 +255,20 @@ export default function DashboardPage() {
 
   // Resources state
   const [resources, setResources] = useState<Resource[]>([]);
-  const [, setIsPasting] = useState(false);
+  const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
+  const [isResourceDragging, setIsResourceDragging] = useState(false);
+  const [isPasting, setIsPasting] = useState(false);
+  const [ingestionProgress, setIngestionProgress] = useState<{ completed: number; total: number } | null>(null);
   const [resourcesPageId, setResourcesPageId] = useState<string | null>(null);
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
   const canvasRef = useRef<InfiniteCanvasRef>(null);
-  const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
+  const activePageIdRef = useRef<string | null>(initialWorkspaceSnapshot.activePageId);
+  const resourcePlacementRef = useRef<Record<string, Array<Pick<Resource, "x" | "y">>>>({});
+  const resourceCacheRef = useRef<Record<string, Resource[]>>({});
+  const resourceRevisionRef = useRef<Record<string, number>>({});
+  const resourceMutationLogRef = useRef<Record<string, ResourceMutation[]>>({});
+  const resourceUploadQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingIngestionCountRef = useRef(0);
   const visibilityRef = useRef<Visibility>(initialDashboardState.visibility);
   const pagesRequestIdRef = useRef(0);
   const pagesCacheRef = useRef<Record<Visibility, PageData[] | null>>({
@@ -295,20 +276,32 @@ export default function DashboardPage() {
     public: null,
   });
   const workspaceSnapshotRef = useRef<Record<Visibility, WorkspaceSnapshot>>(initialDashboardState.workspaces);
+  const autoPageCreationRef = useRef<Record<Visibility, boolean>>({ private: false, public: false });
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restoredWorkspaceRef = useRef<Record<Visibility, boolean>>({ private: false, public: false });
+  const skipNextDashboardPersistRef = useRef<Record<Visibility, boolean>>({ private: false, public: false });
 
-  const handlePanToResource = useCallback((id: string, x: number, y: number) => {
-    if (canvasRef.current) {
-      canvasRef.current.panTo(x, y);
-    }
-    setHighlightedResourceId(id);
-    setTimeout(() => {
-      setHighlightedResourceId(null);
-    }, 3000);
+  useEffect(() => () => {
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    toastTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    toastTimersRef.current.clear();
+    toastDedupeRef.current.clear();
   }, []);
 
   useEffect(() => {
     visibilityRef.current = visibility;
   }, [visibility]);
+
+  useEffect(() => {
+    activePageIdRef.current = activePageId;
+  }, [activePageId]);
+
+  useEffect(() => {
+    if (resourcesPageId) {
+      resourcePlacementRef.current[resourcesPageId] = resources;
+      resourceCacheRef.current[resourcesPageId] = resources;
+    }
+  }, [resources, resourcesPageId]);
 
   const getCanvasViewState = useCallback((): CanvasViewState => {
     return canvasRef.current?.getViewState() ?? {
@@ -358,11 +351,14 @@ export default function DashboardPage() {
         ? [fallbackDate]
         : [];
 
+    // Do not let the state persistence effect overwrite the saved view while these
+    // restored values are being applied to the freshly mounted canvas.
+    skipNextDashboardPersistRef.current[mode] = true;
     setPages(nextPages);
     setActivePageId(activeId);
     setSelectedDate(selected);
     setExpandedDates(new Set(expanded));
-    setIsCanvasMode(snapshot.isCanvasMode);
+    setIsCanvasMode(true);
     setActiveCategory(snapshot.activeCategory);
 
     if (activeId) {
@@ -371,11 +367,11 @@ export default function DashboardPage() {
       localStorage.removeItem(`saveswitch-active-page-${mode}`);
     }
 
-    const canvasView = snapshot.isCanvasMode
-      ? preserveCurrentCanvas
-        ? getCanvasViewState()
-        : snapshot.canvasView
-      : DEFAULT_CANVAS_VIEW;
+    const canvasView = snapshot.isCanvasMode && preserveCurrentCanvas && restoredWorkspaceRef.current[mode]
+      ? getCanvasViewState()
+      : snapshot.isCanvasMode
+        ? snapshot.canvasView
+        : DEFAULT_CANVAS_VIEW;
     requestAnimationFrame(() => {
       canvasRef.current?.setViewState(canvasView);
     });
@@ -387,6 +383,7 @@ export default function DashboardPage() {
       expandedDates: expanded,
       canvasView,
     };
+    restoredWorkspaceRef.current[mode] = true;
     persistDashboardState(mode);
   }, [getCanvasViewState, persistDashboardState]);
 
@@ -405,6 +402,12 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const mode = visibilityRef.current;
+    if (!restoredWorkspaceRef.current[mode]) return;
+    if (skipNextDashboardPersistRef.current[mode]) {
+      skipNextDashboardPersistRef.current[mode] = false;
+      return;
+    }
+
     workspaceSnapshotRef.current[mode] = {
       activePageId,
       selectedDate,
@@ -416,27 +419,68 @@ export default function DashboardPage() {
     persistDashboardState(mode);
   }, [activeCategory, activePageId, expandedDates, getCanvasViewState, isCanvasMode, persistDashboardState, selectedDate]);
 
+  useEffect(() => {
+    const persistCanvasView = () => {
+      const mode = visibilityRef.current;
+      if (!restoredWorkspaceRef.current[mode]) return;
+      const snapshot = workspaceSnapshotRef.current[mode];
+      const canvasView = getCanvasViewState();
+      if (canvasViewsEqual(snapshot.canvasView, canvasView)) return;
+
+      workspaceSnapshotRef.current[mode] = { ...snapshot, canvasView };
+      persistDashboardState(mode);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistCanvasView();
+    };
+    const intervalId = window.setInterval(persistCanvasView, 750);
+    window.addEventListener("pagehide", persistCanvasView);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("pagehide", persistCanvasView);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [getCanvasViewState, persistDashboardState]);
+
   // Fetch resources when active page changes
   useEffect(() => {
-    if (!activePageId) {
+    if (loading || !user || !activePageId) {
       return;
     }
     
     const controller = new AbortController();
+    const pageId = activePageId;
+    const requestedVisibility = visibility;
+    const revisionAtRequestStart = resourceRevisionRef.current[pageId] ?? 0;
 
     const fetchResources = async () => {
       try {
-        const pageId = activePageId;
         const res = await fetch(`${API_BASE}/pages/${pageId}/resources`, {
           credentials: "include",
           signal: controller.signal,
         });
-        if (controller.signal.aborted || activePageId !== pageId) return;
-        if (res.ok) {
-          const data = await res.json();
-          setResourcesPageId(pageId);
-          setResources(data.resources || []);
-        }
+        if (!res.ok) return;
+
+        const data = await res.json();
+        if (
+          controller.signal.aborted ||
+          activePageIdRef.current !== pageId ||
+          visibilityRef.current !== requestedVisibility
+        ) return;
+
+        const createdSinceRequest = (resourceMutationLogRef.current[pageId] ?? [])
+          .filter((mutation) => mutation.revision > revisionAtRequestStart)
+          .map((mutation) => mutation.resource);
+        const nextResources = reconcileFetchedResources(data.resources || [], createdSinceRequest);
+
+        resourceCacheRef.current[pageId] = nextResources;
+        resourcePlacementRef.current[pageId] = nextResources;
+        resourceMutationLogRef.current[pageId] = (resourceMutationLogRef.current[pageId] ?? [])
+          .filter((mutation) => mutation.revision > (resourceRevisionRef.current[pageId] ?? 0));
+        setResourcesPageId(pageId);
+        setResources(nextResources);
       } catch (err) {
         if (controller.signal.aborted) return;
         console.error("Failed to fetch resources", err);
@@ -444,30 +488,42 @@ export default function DashboardPage() {
     };
     fetchResources();
     return () => controller.abort();
-  }, [activePageId, visibility]);
+  }, [activePageId, loading, user, visibility]);
 
   /* ── Fetch user on mount ── */
   useEffect(() => {
+    const controller = new AbortController();
+
     async function initUser() {
       try {
         const meRes = await fetch(`${API_BASE}/auth/me`, {
           credentials: "include",
+          signal: controller.signal,
         });
         const meData = await meRes.json();
-        if (meData.authenticated) {
-          setUser(meData.user);
+        if (!meRes.ok || !meData.authenticated || !meData.user) {
+          router.replace("/login");
+          return;
         }
+
+        setUser(meData.user);
       } catch (err) {
+        if (controller.signal.aborted) return;
         console.error("Error fetching user", err);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
     }
-    initUser();
-  }, []);
+    void initUser();
+    return () => controller.abort();
+  }, [router]);
 
   /* ── Fetch pages when visibility changes ── */
   useEffect(() => {
+    if (loading || !user) return;
+
     const mode = visibility;
     const requestId = ++pagesRequestIdRef.current;
     const controller = new AbortController();
@@ -497,7 +553,7 @@ export default function DashboardPage() {
 
           const fetchedPages = (resData.pages || []) as ApiPage[];
           
-          const formattedPages = fetchedPages.map((p) => ({
+          let formattedPages = fetchedPages.map((p) => ({
             id: p.id,
             color: p.color,
             createdAt: p.created_at,
@@ -505,6 +561,35 @@ export default function DashboardPage() {
           }));
           
           pagesCacheRef.current[mode] = formattedPages;
+
+          if (formattedPages.length === 0 && !autoPageCreationRef.current[mode]) {
+            autoPageCreationRef.current[mode] = true;
+            const createResponse = await fetch(`${API_BASE}/pages`, {
+              method: "POST",
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                color: "#fffDCE",
+                name: "Untitled Page 1",
+                visibility: mode,
+              }),
+              signal: controller.signal,
+            });
+            const createData = await createResponse.json().catch(() => null);
+            if (isAuthenticationError(createData?.error)) {
+              router.replace("/login");
+              return;
+            }
+            if (createResponse.ok && createData?.success && createData.page) {
+              formattedPages = [{
+                id: createData.page.id,
+                color: createData.page.color,
+                createdAt: createData.page.created_at,
+                name: createData.page.name,
+              }];
+            }
+          }
+
           restoreWorkspaceSnapshot(mode, formattedPages, true);
         }
       } catch (err) {
@@ -515,27 +600,9 @@ export default function DashboardPage() {
 
     fetchPages();
     return () => controller.abort();
-  }, [restorePendingWorkspaceSnapshot, restoreWorkspaceSnapshot, visibility]);
-
-  /* ── Grouped resources ── */
-  const dateGroups = groupPagesByDate(pages);
+  }, [loading, restorePendingWorkspaceSnapshot, restoreWorkspaceSnapshot, router, user, visibility]);
 
   /* ── Handlers ── */
-  const handleDateSelect = useCallback((date: string) => {
-    setSelectedDate(date);
-  }, []);
-
-  const handleToggleExpand = useCallback((date: string) => {
-    setExpandedDates((prev) => {
-      const next = new Set(prev);
-      if (next.has(date)) {
-        next.delete(date);
-      } else {
-        next.add(date);
-      }
-      return next;
-    });
-  }, []);
 
   const handleVisibilityToggle = useCallback(
     (mode: Visibility) => {
@@ -563,7 +630,7 @@ export default function DashboardPage() {
   }, []);
 
   const handleAddPage = useCallback(async () => {
-    const randomColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`;
+    const randomColor = createNewCanvasColor();
     
     // Ensure unique default name for the day
     const todayPrefix = new Date().toISOString().split('T')[0];
@@ -581,42 +648,58 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ color: randomColor, name: newName, visibility }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.page) {
-          const newPage: PageData = {
-            id: data.page.id,
-            color: data.page.color,
-            createdAt: data.page.created_at,
-            name: data.page.name,
-          };
-          setPages((prev) => {
-            const next = [...prev, newPage];
-            pagesCacheRef.current[visibility] = next;
-            return next;
-          });
-          setActivePageId(newPage.id);
-          setSelectedDate(todayPrefix);
-          localStorage.setItem(`saveswitch-active-page-${visibility}`, newPage.id);
-          if (shouldAutoEnterCanvasAfterCreate()) {
-            setIsCanvasMode(true);
-          }
-          setExpandedDates((prev) => new Set(prev).add(todayPrefix));
-        } else {
-          showToast(`Failed to add page: ${data.error || 'Unknown error'}`, 'error');
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success || !data.page) {
+        if (isAuthenticationError(data?.error)) {
+          router.replace("/login");
+          return;
         }
+        showToast(
+          getApiErrorMessage(data?.error, "Unable to create a new page. Please try again."),
+          "error",
+        );
+        return;
       }
+
+      const newPage: PageData = {
+        id: data.page.id,
+        color: data.page.color,
+        createdAt: data.page.created_at,
+        name: data.page.name,
+      };
+      setPages((prev) => {
+        const next = [...prev, newPage];
+        pagesCacheRef.current[visibility] = next;
+        return next;
+      });
+      setActivePageId(newPage.id);
+      setSelectedDate(todayPrefix);
+      localStorage.setItem(`saveswitch-active-page-${visibility}`, newPage.id);
+      if (shouldAutoEnterCanvasAfterCreate()) {
+        setIsCanvasMode(true);
+      }
+      setExpandedDates((prev) => new Set(prev).add(todayPrefix));
+      showToast("Page created successfully!", "success");
     } catch (err) {
       console.error("Failed to add page", err);
       showToast("A network error occurred while adding the page.", 'error');
     }
-  }, [pages, showToast, visibility]);
+  }, [pages, router, showToast, visibility]);
 
   const handlePageSelect = useCallback((id: string) => {
     setActivePageId(id);
     localStorage.setItem(`saveswitch-active-page-${visibility}`, id);
     setIsCanvasMode(true);
   }, [visibility]);
+
+  const handleCanvasPageNavigation = useCallback((direction: "previous" | "next") => {
+    const currentIndex = pages.findIndex((page) => page.id === activePageId);
+    if (currentIndex === -1) return;
+
+    const adjacentIndex = direction === "next" ? currentIndex + 1 : currentIndex - 1;
+    const adjacentPage = pages[adjacentIndex];
+    if (adjacentPage) handlePageSelect(adjacentPage.id);
+  }, [activePageId, handlePageSelect, pages]);
 
   const handleCardSwipe = useCallback((id: string) => {
     setActivePageId(id);
@@ -685,6 +768,31 @@ export default function DashboardPage() {
     }
   };
 
+  const handleUpdateTextResource = useCallback(async (id: string, content: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/resources/${id}/content`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Unable to update this text.");
+      }
+
+      const savedContent = typeof data.resource?.content === "string" ? data.resource.content : content;
+      setResources((prev) => prev.map((resource) =>
+        resource.id === id ? { ...resource, content: savedContent } : resource
+      ));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to update this text.";
+      showToast(message, "error");
+      throw new Error(message);
+    }
+  }, [showToast]);
+
   const executeDeleteResource = useCallback(async (id: string) => {
     try {
       const res = await fetch(`${API_BASE}/resources/${id}`, {
@@ -716,117 +824,170 @@ export default function DashboardPage() {
     });
   }, [executeDeleteResource]);
 
-  const handlePageUpdateName = useCallback(async (id: string, newName: string) => {
-    if (!newName.trim()) return;
+  const handlePanToResource = useCallback((resource: Resource, category: Category) => {
+    setActiveCategory(category);
+    canvasRef.current?.panTo(resource.x ?? 100, resource.y ?? 100);
+    setHighlightedResourceId(resource.id);
 
-    const targetPage = pages.find(p => p.id === id);
-    if (!targetPage) return;
-    
-    const targetDate = targetPage.createdAt.split('T')[0];
-    const isDuplicate = pages.some(p => p.id !== id && p.name.trim() === newName.trim() && p.createdAt.startsWith(targetDate));
-    
-    if (isDuplicate) {
-      showToast("A page with this name already exists on this day.", 'error');
+    if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedResourceId(null);
+      highlightTimeoutRef.current = null;
+    }, 2600);
+  }, []);
+
+  const beginResourceIngestion = useCallback(() => {
+    pendingIngestionCountRef.current += 1;
+    setIsPasting(true);
+  }, []);
+
+  const finishResourceIngestion = useCallback(() => {
+    pendingIngestionCountRef.current = Math.max(0, pendingIngestionCountRef.current - 1);
+    setIsPasting(pendingIngestionCountRef.current > 0);
+  }, []);
+
+  const processPaste = useCallback((type: Resource["type"], content: string, title?: string, pageId = activePageIdRef.current): Promise<boolean> => {
+    if (!pageId || !content) return Promise.resolve(false);
+
+    const saveResource = async (): Promise<boolean> => {
+      const BOX_W = 320;
+      const BOX_H = 340;
+      let x = Math.round((window.innerWidth / 2) - (BOX_W / 2) - canvasOffsetRef.current.x);
+      let y = Math.round((window.innerHeight / 2) - (BOX_H / 2) - canvasOffsetRef.current.y);
+      const placements = resourcePlacementRef.current[pageId] ?? [];
+      let isOccupied = true;
+      let attempts = 0;
+      let dx = 0;
+      let dy = 0;
+      let segmentLength = 1;
+      let segmentPassed = 0;
+      let direction = 0;
+
+      while (isOccupied && attempts < 50) {
+        isOccupied = placements.some((resource) => {
+          const resourceX = resource.x ?? 100;
+          const resourceY = resource.y ?? 100;
+          return !(x + BOX_W <= resourceX || x >= resourceX + BOX_W || y + BOX_H <= resourceY || y >= resourceY + BOX_H);
+        });
+
+        if (isOccupied) {
+          if (direction === 0) { dx = 1; dy = 0; }
+          else if (direction === 1) { dx = 0; dy = 1; }
+          else if (direction === 2) { dx = -1; dy = 0; }
+          else { dx = 0; dy = -1; }
+
+          x += dx * BOX_W;
+          y += dy * BOX_H;
+          segmentPassed += 1;
+          if (segmentPassed === segmentLength) {
+            segmentPassed = 0;
+            direction = (direction + 1) % 4;
+            if (direction === 0 || direction === 2) segmentLength += 1;
+          }
+          attempts += 1;
+        }
+      }
+
+      const reservation = { x, y };
+      resourcePlacementRef.current[pageId] = [...placements, reservation];
+      const clearReservation = () => {
+        resourcePlacementRef.current[pageId] = (resourcePlacementRef.current[pageId] ?? []).filter((resource) => resource !== reservation);
+      };
+
+      try {
+        const response = await fetch(`${API_BASE}/pages/${pageId}/resources`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type, content, title, x, y }),
+        });
+        const data = await response.json().catch(() => null) as { success?: boolean; resource?: Resource; error?: unknown } | null;
+        if (!response.ok || !data?.success || !data.resource) {
+          throw new Error(getApiErrorMessage(data?.error, `Unable to save this resource (status ${response.status}).`));
+        }
+
+        const createdResource = data.resource;
+        const cachedResources = resourceCacheRef.current[pageId] ?? [];
+        const nextResources = reconcileFetchedResources(cachedResources, [createdResource]);
+        const nextRevision = (resourceRevisionRef.current[pageId] ?? 0) + 1;
+
+        resourceRevisionRef.current[pageId] = nextRevision;
+        resourceMutationLogRef.current[pageId] = [
+          ...(resourceMutationLogRef.current[pageId] ?? []),
+          { revision: nextRevision, resource: createdResource },
+        ];
+        resourceCacheRef.current[pageId] = nextResources;
+        resourcePlacementRef.current[pageId] = (resourcePlacementRef.current[pageId] ?? []).map((resource) =>
+          resource === reservation ? createdResource : resource
+        );
+        if (activePageIdRef.current === pageId) {
+          setResourcesPageId(pageId);
+          setResources(nextResources);
+        }
+        return true;
+      } catch (error) {
+        clearReservation();
+        const label = title ? `“${title}”` : type;
+        showToast(`Could not save ${label}: ${getApiErrorMessage(error instanceof Error ? error.message : "", "Please try again.")}`, "error");
+        return false;
+      }
+    };
+
+    const queued = resourceUploadQueueRef.current.then(saveResource, saveResource);
+    resourceUploadQueueRef.current = queued.then(() => undefined, () => undefined);
+    return queued;
+  }, [showToast]);
+
+  const handleFileUploads = useCallback(async (files: File[]) => {
+    if (!isCanvasMode) {
+      showToast("Please enter a canvas to upload resources.", "info");
+      return;
+    }
+    if (!activePageId) {
+      showToast("Please select a page first to upload resources.", "info");
       return;
     }
 
-    setPages((prev) => {
-      const next = prev.map((p) => (p.id === id ? { ...p, name: newName.trim() } : p));
-      pagesCacheRef.current[visibility] = next;
-      return next;
-    });
-
-    try {
-      const res = await fetch(`${API_BASE}/pages/${id}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName.trim() }),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        showToast(`Failed to update page name: ${errData.error || 'Unknown error'}`, 'error');
-      }
-    } catch (err) {
-      console.error("Failed to update page name", err);
-      showToast("A network error occurred while updating the page name.", 'error');
+    const oversizedFiles = files.filter((file) => file instanceof File && file.size > MAX_RESOURCE_UPLOAD_BYTES);
+    const validFiles = files.filter((file) => file instanceof File && file.size > 0 && file.size <= MAX_RESOURCE_UPLOAD_BYTES && file.name.trim().length > 0);
+    if (oversizedFiles.length > 0) {
+      showToast(`${oversizedFiles.length} file${oversizedFiles.length === 1 ? " is" : "s are"} over the 10 MB limit and ${oversizedFiles.length === 1 ? "was" : "were"} skipped.`, "error");
     }
-  }, [pages, showToast, visibility]);
 
-  const handleFabClick = useCallback(() => {
-    setIsCanvasMode((prev) => !prev);
-  }, []);
+    if (validFiles.length === 0) {
+      showToast("No non-empty files were selected. Empty folders cannot be uploaded.", "info");
+      return;
+    }
+    if (validFiles.length !== files.length) {
+      showToast(`${files.length - validFiles.length} empty or unsupported selection${files.length - validFiles.length === 1 ? " was" : "s were"} skipped.`, "info");
+    }
 
-  const processPaste = useCallback(async (type: Resource['type'], content: string, title?: string) => {
-    if (!activePageId) return;
-    setIsPasting(true);
-    showToast(`Pasting ${type}...`, 'info');
-    
-    // Find a completely clear space using a spiral grid search to prevent ANY overlapping
-    const BOX_W = 320;
-    const BOX_H = 340; // Generous bounding box for cards
-    
-    // Adjust by subtracting the canvas pan offset so it spawns exactly in the center of the user's current view
-    // Ensure the final values are integers to avoid database errors
-    let x = Math.round((window.innerWidth / 2) - (BOX_W / 2) - canvasOffsetRef.current.x);
-    let y = Math.round((window.innerHeight / 2) - (BOX_H / 2) - canvasOffsetRef.current.y);
-    
-    let isOccupied = true;
-    let attempts = 0;
-    let dx = 0, dy = 0;
-    let segmentLength = 1, segmentPassed = 0, direction = 0;
-
-    while (isOccupied && attempts < 50) {
-      isOccupied = resources.some(r => {
-        const rx = r.x ?? 100;
-        const ry = r.y ?? 100;
-        // Check for bounding box intersection
-        return !(x + BOX_W <= rx || x >= rx + BOX_W || y + BOX_H <= ry || y >= ry + BOX_H);
-      });
-
-      if (isOccupied) {
-        if (direction === 0) { dx = 1; dy = 0; }
-        else if (direction === 1) { dx = 0; dy = 1; }
-        else if (direction === 2) { dx = -1; dy = 0; }
-        else if (direction === 3) { dx = 0; dy = -1; }
-
-        x += dx * BOX_W;
-        y += dy * BOX_H;
-        segmentPassed++;
-
-        if (segmentPassed === segmentLength) {
-          segmentPassed = 0;
-          direction = (direction + 1) % 4;
-          if (direction === 0 || direction === 2) {
-            segmentLength++;
-          }
+    const targetPageId = activePageId;
+    let savedCount = 0;
+    beginResourceIngestion();
+    setIngestionProgress({ completed: 0, total: validFiles.length });
+    try {
+      for (const [index, file] of validFiles.entries()) {
+        const title = file.webkitRelativePath || file.name;
+        try {
+          const type = resourceTypeForFile(file);
+          const content = await readResourceFileContent(file, type);
+          if (await processPaste(type, content, title, targetPageId)) savedCount += 1;
+        } catch (error) {
+          showToast(`Could not read “${title}”: ${getApiErrorMessage(error instanceof Error ? error.message : "", "Please choose another file.")}`, "error");
+        } finally {
+          setIngestionProgress({ completed: index + 1, total: validFiles.length });
         }
-        attempts++;
       }
-    }
 
-    try {
-      const res = await fetch(`${API_BASE}/pages/${activePageId}/resources`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type, content, title, x, y }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setResources(prev => [...prev, data.resource]);
-        setResourcesPageId(activePageId);
-        showToast(`Resource saved successfully!`, 'success');
-      } else {
-        showToast(getApiErrorMessage(data.error, "Unable to save this resource. Please try again."), 'error');
+      if (savedCount > 0) {
+        showToast(`${savedCount} resource${savedCount === 1 ? "" : "s"} saved.`, "success");
       }
-    } catch (err) {
-      console.error("Paste upload failed", err);
-      showToast("Network error while pasting.", 'error');
     } finally {
-      setIsPasting(false);
+      setIngestionProgress(null);
+      finishResourceIngestion();
     }
-  }, [activePageId, resources, showToast]);
+  }, [activePageId, beginResourceIngestion, finishResourceIngestion, isCanvasMode, processPaste, showToast]);
 
   const handlePaste = useCallback(async () => {
     if (!isCanvasMode) {
@@ -837,296 +998,231 @@ export default function DashboardPage() {
       showToast("Please select a page first to paste resources.", "info");
       return;
     }
-    
+
+    const targetPageId = activePageId;
+    let savedCount = 0;
+    beginResourceIngestion();
     try {
-      const items = await navigator.clipboard.read();
-      let hasItem = false;
-      
-      for (const item of items) {
-        if (item.types.some(t => t.startsWith('image/'))) {
-          hasItem = true;
-          const imageType = item.types.find(t => t.startsWith('image/'));
-          if (imageType) {
-            const blob = await item.getType(imageType);
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste("image", reader.result as string);
-            reader.readAsDataURL(blob);
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imageType = item.types.find((type) => SUPPORTED_IMAGE_MIME_TYPES.has(type.toLowerCase()));
+          const fileType = imageType ?? (item.types.includes("application/pdf") ? "application/pdf" : undefined);
+          if (fileType) {
+            const blob = await item.getType(fileType);
+            if (blob.size > MAX_RESOURCE_UPLOAD_BYTES) {
+              showToast("Clipboard file is over the 10 MB limit and was skipped.", "error");
+              continue;
+            }
+            const type = imageType ? "image" : "pdf";
+            const content = await readResourceFileContent(blob, type);
+            if (await processPaste(type, content, imageType ? "Pasted image" : "Pasted PDF", targetPageId)) savedCount += 1;
+            continue;
           }
-        } else if (item.types.includes('application/pdf')) {
-           hasItem = true;
-           const blob = await item.getType('application/pdf');
-           const reader = new FileReader();
-           reader.onloadend = () => processPaste("pdf", reader.result as string);
-           reader.readAsDataURL(blob);
-        } else if (item.types.includes('text/plain')) {
-          hasItem = true;
-          const blob = await item.getType('text/plain');
-          const text = await blob.text();
-          const isUrl = /^https?:\/\//i.test(text.trim());
-          processPaste(isUrl ? "link" : "text", text.trim());
+
+          if (item.types.includes("text/plain")) {
+            const text = (await (await item.getType("text/plain")).text()).trim();
+            if (text && await processPaste(isHttpUrl(text) ? "link" : "text", text, undefined, targetPageId)) savedCount += 1;
+            continue;
+          }
+
+          const genericType = item.types.find((type) => !type.startsWith("text/") && type !== "text/html");
+          if (genericType) {
+            const blob = await item.getType(genericType);
+            if (blob.size > MAX_RESOURCE_UPLOAD_BYTES) {
+              showToast("Clipboard file is over the 10 MB limit and was skipped.", "error");
+              continue;
+            }
+            const content = await readResourceFileContent(blob, "file");
+            if (await processPaste("file", content, "Pasted file", targetPageId)) savedCount += 1;
+          }
         }
+      } else {
+        const text = (await navigator.clipboard.readText()).trim();
+        if (text && await processPaste(isHttpUrl(text) ? "link" : "text", text, undefined, targetPageId)) savedCount += 1;
       }
-      
-      if (!hasItem) {
+
+      if (savedCount === 0) {
         showToast("Clipboard is empty or contains unsupported content.", "info");
+      } else {
+        showToast(`${savedCount} resource${savedCount === 1 ? "" : "s"} saved.`, "success");
       }
-    } catch (err) {
-      console.error("Paste read failed", err);
-      // Fallback for browsers without advanced clipboard API
+    } catch {
       try {
-        const text = await navigator.clipboard.readText();
-        if (text) {
-          const isUrl = /^https?:\/\//i.test(text.trim());
-          processPaste(isUrl ? "link" : "text", text.trim());
+        const text = (await navigator.clipboard.readText()).trim();
+        if (text && await processPaste(isHttpUrl(text) ? "link" : "text", text, undefined, targetPageId)) {
+          showToast("Resource saved.", "success");
         } else {
-           showToast("Clipboard is empty.", "info");
+          showToast("Clipboard is empty or contains unsupported content.", "info");
         }
       } catch {
-        showToast("Failed to read from clipboard. Allow clipboard permissions.", "error");
+        showToast("Failed to read from clipboard. Allow clipboard permissions and try again.", "error");
       }
+    } finally {
+      finishResourceIngestion();
     }
-  }, [activePageId, processPaste, showToast, isCanvasMode]);
-
-  const handleFileUploads = useCallback((files: File[]) => {
-    if (!isCanvasMode) {
-      showToast("Please enter a canvas to upload resources.", "info");
-      return;
-    }
-    if (!activePageId) {
-      showToast("Please select a page first to upload resources.", "info");
-      return;
-    }
-
-    for (const file of files) {
-      const reader = new FileReader();
-      if (file.type.startsWith('image/')) {
-        reader.onloadend = () => processPaste("image", reader.result as string, file.name);
-      } else if (file.type === 'application/pdf') {
-        reader.onloadend = () => processPaste("pdf", reader.result as string, file.name);
-      } else {
-        reader.onloadend = () => processPaste("file", reader.result as string, file.name);
-      }
-      reader.readAsDataURL(file);
-    }
-  }, [activePageId, isCanvasMode, processPaste, showToast]);
+  }, [activePageId, beginResourceIngestion, finishResourceIngestion, isCanvasMode, processPaste, showToast]);
 
   useEffect(() => {
-    const handleGlobalPaste = (e: ClipboardEvent) => {
-      // Ignore if typing in an input
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (!activePageId) return;
-      if (!isCanvasMode) return;
-      
-      const items = Array.from(e.clipboardData?.items || []);
+    const handleGlobalPaste = (event: ClipboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("input, textarea, [contenteditable='true']") || !activePageId || !isCanvasMode) return;
+      const items = Array.from(event.clipboardData?.items ?? []);
       if (items.length === 0) return;
 
-      let processed = false;
-      for (const item of items) {
-        if (item.type.startsWith('image/')) {
-          const file = item.getAsFile();
-          if (file) {
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste("image", reader.result as string, file.name);
-            reader.readAsDataURL(file);
-            processed = true;
+      event.preventDefault();
+      const targetPageId = activePageId;
+      const processItems = async () => {
+        let savedCount = 0;
+        beginResourceIngestion();
+        try {
+          for (const item of items) {
+            if (item.type === "text/plain") {
+              const text = (await new Promise<string>((resolve) => item.getAsString(resolve))).trim();
+              if (text && await processPaste(isHttpUrl(text) ? "link" : "text", text, undefined, targetPageId)) savedCount += 1;
+              continue;
+            }
+
+            const file = item.getAsFile();
+            if (file && file.size > 0 && file.size <= MAX_RESOURCE_UPLOAD_BYTES) {
+              const type = resourceTypeForFile(file);
+              const content = await readResourceFileContent(file, type);
+              if (await processPaste(type, content, file.name || "Pasted file", targetPageId)) savedCount += 1;
+            } else if (file && file.size > MAX_RESOURCE_UPLOAD_BYTES) {
+              showToast("Clipboard file is over the 10 MB limit and was skipped.", "error");
+            }
           }
-        } else if (item.type === 'application/pdf') {
-          const file = item.getAsFile();
-          if (file) {
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste("pdf", reader.result as string, file.name);
-            reader.readAsDataURL(file);
-            processed = true;
-          }
-        } else if (item.type === 'text/plain') {
-          item.getAsString((text) => {
-            const isUrl = /^https?:\/\//i.test(text.trim());
-            processPaste(isUrl ? "link" : "text", text.trim());
-          });
-          processed = true;
-        } else {
-          // If we got a generic file from the clipboard (some browsers support this)
-          const file = item.getAsFile();
-          if (file) {
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste("file", reader.result as string, file.name);
-            reader.readAsDataURL(file);
-            processed = true;
-          }
+          if (savedCount === 0) showToast("Clipboard is empty or contains unsupported content.", "info");
+        } catch (error) {
+          showToast(`Could not process clipboard content: ${getApiErrorMessage(error instanceof Error ? error.message : "", "Please try again.")}`, "error");
+        } finally {
+          finishResourceIngestion();
         }
-      }
-      
-      if (processed) {
-        e.preventDefault(); // Stop default pasting if we handled it
-      }
+      };
+      void processItems();
     };
 
-    const handleUploadEvent = (e: Event) => {
-      const customEvent = e as CustomEvent<{ files?: File[] }>;
-      if (customEvent.detail?.files) {
-        handleFileUploads(customEvent.detail.files);
-      }
+    const handleUploadEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<{ files?: File[] }>;
+      if (customEvent.detail?.files) void handleFileUploads(customEvent.detail.files);
     };
-    
-    window.addEventListener('paste', handleGlobalPaste);
-    window.addEventListener('saveswitch-upload', handleUploadEvent);
+
+    window.addEventListener("paste", handleGlobalPaste);
+    window.addEventListener("saveswitch-upload", handleUploadEvent);
     return () => {
-       window.removeEventListener('paste', handleGlobalPaste);
-       window.removeEventListener('saveswitch-upload', handleUploadEvent);
+      window.removeEventListener("paste", handleGlobalPaste);
+      window.removeEventListener("saveswitch-upload", handleUploadEvent);
     };
-  }, [activePageId, handleFileUploads, isCanvasMode, processPaste]);
+  }, [activePageId, beginResourceIngestion, finishResourceIngestion, handleFileUploads, isCanvasMode, processPaste, showToast]);
 
   /* ── Active Page state ── */
   const activePage = pages.find(p => p.id === activePageId);
   const visibleResources = resourcesPageId === activePageId ? resources : [];
   const filteredResources = activeCategory === 'target'
     ? visibleResources
-    : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true);
+    : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'file' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : r.type === 'link');
 
   /* ── Loading state ── */
-  if (loading) {
+  if (loading || !user) {
     return <LoadingSpinner />;
   }
 
   return (
     <>
-      {/* ── Left Sidebar ── */}
-      <DashboardSidebar
-        user={user}
-        dateGroups={dateGroups}
-        selectedDate={selectedDate}
-        expandedDates={expandedDates}
-        onDateSelect={handleDateSelect}
-        onToggleExpand={handleToggleExpand}
-        onLogout={handleLogout}
-        collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
-        onPageSelect={handlePageSelect}
-        onPageUpdateName={handlePageUpdateName}
-        activePageId={activePageId}
-        onDeletePage={handleDeletePage}
-      />
-
-      {/* ── Main Content Area ── */}
       <main
-        className="relative flex h-dvh flex-1 flex-col overflow-hidden"
-        style={{ background: "var(--color-app-bg)" }}
+        className="relative h-dvh min-w-0 flex-1 overflow-hidden"
+        style={{ background: "#fffDCE" }}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
           if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-            handleFileUploads(Array.from(e.dataTransfer.files));
+            void handleFileUploads(Array.from(e.dataTransfer.files));
           }
         }}
       >
-        <div className="relative flex-1 flex flex-col overflow-hidden bg-black">
-          {/* ── Private/Public Toggle (top center) ── */}
-          <div className="pointer-events-none absolute left-0 top-0 z-10 flex w-full justify-center px-20 pt-4 sm:pt-8">
-            <div className="pointer-events-auto">
-              <VisibilityToggle
-                visibility={visibility}
-                onToggle={handleVisibilityToggle}
-              />
+        <div className="relative h-full overflow-hidden">
+          <InfiniteCanvas
+            ref={canvasRef}
+            isActive={isCanvasMode}
+            canvasColor={activePage?.color || "#fffDCE"}
+            canvasOffsetRef={canvasOffsetRef}
+            onNavigatePage={handleCanvasPageNavigation}
+            isResourceDragging={isResourceDragging}
+          >
+            <div className="flex h-full w-full flex-1 items-center justify-center">
+              {pages.length > 0 ? (
+                <CardStack
+                  pages={pages}
+                  activePageId={activePageId}
+                  isExpanded={isCanvasMode}
+                  onPageSelect={handleCardSwipe}
+                  resources={filteredResources}
+                  onDeleteResource={handleDeleteResource}
+                  onUpdateResourcePosition={handleUpdateResourcePosition}
+                  onUpdateTextResource={handleUpdateTextResource}
+                  onResourceDragStateChange={setIsResourceDragging}
+                  highlightedResourceId={highlightedResourceId}
+                />
+              ) : (
+                null
+              )}
             </div>
-          </div>
+          </InfiniteCanvas>
 
-          {/* ── Category Switch (top right) ── */}
-          <div className="absolute right-4 top-16 z-10 pointer-events-auto sm:right-8 sm:top-8">
-            <CategorySwitch activeCategory={activeCategory} onChange={setActiveCategory} />
-          </div>
-
-          {/* ── Resource Navigator (top left) ── */}
-          <ResourceNavigator 
-            resources={filteredResources} 
-            onSelectResource={handlePanToResource} 
-            isActive={isCanvasMode} 
-          />
-
-          {/* ── Workspace / Card Stack (centered) ── */}
-          <InfiniteCanvas ref={canvasRef} isActive={isCanvasMode} canvasColor={activePage?.color || "var(--color-app-bg)"} canvasOffsetRef={canvasOffsetRef}>
-            <div className="flex-1 flex items-center justify-center h-full w-full">
-            {pages.length > 0 ? (
-              <CardStack 
-                pages={pages}
-                activePageId={activePageId}
-                isExpanded={isCanvasMode} 
-                onPageSelect={handleCardSwipe}
-                resources={filteredResources}
-                onDeleteResource={handleDeleteResource}
-                onUpdateResourcePosition={handleUpdateResourcePosition}
-                highlightedResourceId={highlightedResourceId}
-              />
-            ) : (
-              <div className="flex flex-col items-center justify-center w-full h-full">
-                <span
-                  className="font-arimo text-sm"
-                  style={{ color: "var(--color-text-muted)" }}
-                >
-                  No pages yet. Click the + button on the right to create a new page.
-                </span>
-              </div>
-            )}
-          </div>
-        </InfiniteCanvas>
-
-        {/* ── Bottom/Right Navigation (Floating) ── */}
-        <div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 sm:bottom-auto sm:left-auto sm:top-1/2 sm:-translate-x-0 sm:-translate-y-1/2 right-auto sm:right-[66px]">
-          <ResourceMiniPanel
+          <FigmaDashboardChrome
+            user={user}
             pages={pages}
+            resources={visibleResources}
             activePageId={activePageId}
-            onAddPage={handleAddPage}
+            activeCategory={activeCategory}
+            visibility={visibility}
             onPageSelect={handlePageSelect}
             onDeletePage={handleDeletePage}
-          />
-        </div>
-
-        {/* ── Minimizer Button ── */}
-        <div className="absolute bottom-4 right-4 z-10 sm:bottom-6 sm:right-6">
-          <FloatingActionButton 
-            onClick={handleFabClick} 
+            onAddPage={handleAddPage}
+            onCategoryChange={setActiveCategory}
+            onResourceSelect={handlePanToResource}
+            onDeleteResource={handleDeleteResource}
+            onVisibilityChange={handleVisibilityToggle}
+            onFileUploads={handleFileUploads}
             onPaste={handlePaste}
-            isActive={isCanvasMode} 
+            isResourceIngesting={isPasting}
+            ingestionProgress={ingestionProgress}
+            onOpenProfile={() => window.location.assign("/dashboard/profile")}
+            onLogout={handleLogout}
           />
         </div>
-
-        </div> {/* Close inner relative flex-1 div */}
       </main>
 
       {/* ── Global Toaster ── */}
-      <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-50 flex flex-col items-end gap-3 sm:bottom-8 sm:left-auto sm:right-8">
+      <div className="pointer-events-none fixed bottom-3 left-3 right-3 z-50 flex flex-col items-end gap-1.5 sm:bottom-5 sm:left-auto sm:right-5" aria-live="polite" aria-relevant="additions">
         {toasts.map((toast) => (
           <div
             key={toast.id}
-            className="pointer-events-auto flex w-full items-center gap-3 rounded-xl px-4 py-3.5 shadow-[0_8px_30px_rgba(0,0,0,0.3)] sm:w-auto sm:px-5"
+            role={toast.type === "error" ? "alert" : "status"}
+            className="pointer-events-auto flex w-full items-center gap-2 rounded-full px-3 py-2 shadow-[0_5px_16px_rgba(80,73,42,0.13)] sm:w-auto"
             style={{
-              maxWidth: "min(420px, calc(100vw - 32px))",
-              background:
-                toast.type === "error"
-                  ? "rgba(50, 20, 20, 0.65)"
-                  : "rgba(30, 30, 30, 0.65)",
-              border:
-                toast.type === "error"
-                  ? "1px solid rgba(255, 100, 100, 0.15)"
-                  : "1px solid rgba(255, 255, 255, 0.1)",
-              backdropFilter: "blur(20px)",
-              WebkitBackdropFilter: "blur(20px)",
-              transformOrigin: "bottom right",
-              animation: "toast-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards",
+              maxWidth: "min(320px, calc(100vw - 24px))",
+              background: toast.type === "error"
+                ? "rgba(255, 244, 244, 0.82)"
+                : "rgba(255, 255, 255, 0.62)",
+              border: toast.type === "error"
+                ? "1px solid rgba(224, 103, 103, 0.32)"
+                : "1px solid rgba(255, 255, 255, 0.72)",
+              backdropFilter: "blur(16px)",
+              WebkitBackdropFilter: "blur(16px)",
+              animation: "toast-slide-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both",
             }}
           >
             {toast.type === "error" && (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255, 140, 140, 1)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(196, 77, 77, 0.92)" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="8.5" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
             )}
             <span
-              className="font-arimo text-[14px] leading-relaxed tracking-wide"
-              style={{
-                color: toast.type === "error" ? "rgba(255, 210, 210, 1)" : "white",
-                overflowWrap: "anywhere",
-              }}
+              className="font-arimo text-[11px] font-medium leading-[1.25] tracking-[0.01em]"
+              style={{ color: toast.type === "error" ? "rgba(139, 53, 53, 0.96)" : "rgba(44, 43, 37, 0.92)", overflowWrap: "anywhere" }}
             >
               {toast.message}
             </span>
@@ -1190,7 +1286,7 @@ export default function DashboardPage() {
               <button
                 type="button"
                 onClick={confirmModal.onConfirm}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-all bg-red-600 hover:bg-red-700 text-white shadow-md hover:shadow-lg active:scale-95 border-none"
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-all border border-[#FF2A2A]/30 bg-[#FF2A2A]/10 text-[#FF2A2A] hover:bg-[#FF2A2A]/15 shadow-md hover:shadow-lg active:scale-95"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
@@ -1198,7 +1294,6 @@ export default function DashboardPage() {
                   alt=""
                   width={16}
                   height={16}
-                  style={{ filter: "brightness(0) invert(1)" }}
                 />
                 Delete
               </button>

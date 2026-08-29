@@ -1,0 +1,27 @@
+.focusedResource::before {
+  position: absolute;
+  z-index: 46;
+  inset: -5px;
+  border-radius: 17px;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, #176bff 0 8px, transparent 8px 13px) 0 0 / 13px 2px repeat-x,
+    repeating-linear-gradient(90deg, #176bff 0 8px, transparent 8px 13px) 0 100% / 13px 2px repeat-x,
+    repeating-linear-gradient(0deg, #176bff 0 8px, transparent 8px 13px) 0 0 / 2px 13px repeat-y,
+    repeating-linear-gradient(0deg, #176bff 0 8px, transparent 8px 13px) 100% 0 / 2px 13px repeat-y;
+  filter: drop-shadow(0 0 6px rgba(23, 107, 255, 0.44));
+  content: "";
+  animation: focusedMarch 680ms linear infinite;
+}
+
+@keyframes focusedMarch {
+  to {
+    background-position: 13px 0, -13px 100%, 0 -13px, 100% 13px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focusedResource::before {
+    animation: none;
+  }
+}
