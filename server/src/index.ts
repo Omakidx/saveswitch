@@ -46,6 +46,7 @@ import {
   XOOMSHARE_MAX_RESOURCES,
   XOOMSHARE_MAX_TITLE_BYTES,
 } from './xoomshare-security'
+import { getExpiredXoomshareRoomCondition } from './xoomshare-expiry'
 
 // ── Types for Google API responses ──
 interface GoogleTokenResponse {
@@ -417,12 +418,8 @@ const drainAssetDeletionQueue = async (limit = 25) => {
 
 const cleanupExpiredXoomshareRooms = async () => {
   try {
-    const now = new Date()
-    const candidates = await db.select().from(pages).where(and(
-      isNotNull(pages.pathCode),
-      isNotNull(pages.sessionId),
-      sql`(${pages.expiresAt} < ${now} OR ${pages.createdAt} < ${new Date(Date.now() - XOOMSHARE_TTL_MS)})`,
-    ))
+    const candidates = await db.select().from(pages)
+      .where(getExpiredXoomshareRoomCondition(new Date(), XOOMSHARE_TTL_MS))
     let deletedCount = 0
     for (const candidate of candidates) {
       deletedCount += await db.transaction(async (tx) => {
