@@ -1,0 +1,26 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateAndUpdateReviewedLightsailGraph",
+      "Effect": "Allow",
+      "Action": [
+        "lightsail:AttachDisk",
+        "lightsail:CreateDisk",
+        "lightsail:CreateInstances",
+        "lightsail:EnableAddOn",
+        "lightsail:ImportKeyPair",
+        "lightsail:PutInstancePublicPorts",
+        "lightsail:TagResource",
+        "lightsail:UntagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalAccount": "065897469956",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    }
+  ]
+}

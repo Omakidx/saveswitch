@@ -1,0 +1,38 @@
+aws_account_id      = "123456789012"
+acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000"
+
+# Foundation phase: leave the service disabled and omit api_image_digest.
+# After pushing/scanning the image and populating all secret values, set the
+# real immutable digest, close the documented application gates, then review a
+# new plan with both flags true.
+enable_api_service = false
+api_runtime_ready  = false
+# api_image_digest = "sha256:REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+
+# Advisory alert threshold, not a hard spending cap. Add the real recipient in
+# an ignored terraform.tfvars file only after the data owner approves it.
+budget_limit_usd = 250
+alert_email      = null
+
+# Privacy gated until WAF field/retention review is complete.
+enable_waf_logging = false
+
+# ALB request logs can contain OAuth query parameters and full paths. Metrics
+# and application logs remain available while this privacy gate is closed.
+enable_alb_access_logs          = false
+alb_access_log_privacy_accepted = false
+
+# Keep disabled. Application code does not yet have the required idempotent job
+# mode and Cloudinary reconciliation is not yet accepted. The future first
+# cleanup change sets create_cleanup_resources=true but leaves the schedule
+# disabled for canaries; enabling is a later reviewed change.
+create_cleanup_resources             = false
+enable_cleanup_scheduler             = false
+cleanup_job_ready                    = false
+cleanup_completion_monitoring_ready = false
+cleanup_command                      = []
+
+tags = {
+  Owner      = "platform"
+  CostCenter = "saveswitch"
+}

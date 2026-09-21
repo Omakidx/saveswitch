@@ -1,0 +1,172 @@
+# Runtime-only declaration: no credentials, AWS resources, or public ports.
+name: saveswitch
+
+services:
+  postgres:
+    # Put an immutable official PostgreSQL 18 digest in runtime.env. The
+    # validator rejects a missing digest contract and no tag fallback exists.
+    image: ${POSTGRES_IMAGE:?POSTGRES_IMAGE must be an immutable digest}
+    pull_policy: missing
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_DB: saveswitch
+      # The controlled database-load workflow administers the fresh cluster
+      # through the standard local-only postgres bootstrap role. Application
+      # traffic later uses the separately created saveswitch_app role.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_INITDB_ARGS: --data-checksums --auth-host=scram-sha-256
+    secrets:
+      - postgres_password
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR must be on the attached disk}
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${POSTGRES_TLS_CERT_FILE:?}
+        target: /run/saveswitch/postgres-server.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${POSTGRES_TLS_KEY_FILE:?}
+        target: /run/saveswitch/postgres-server.key
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/saveswitch/postgres-server.crt
+      - -c
+      - ssl_key_file=/run/saveswitch/postgres-server.key
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - work_mem=1MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=20
+      - -c
+      - max_wal_size=512MB
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+    expose:
+      - "5432"
+    # nano_3_0 has 512 MiB RAM; leave room for the API, tunnel, and kernel.
+    mem_limit: 256m
+    mem_reservation: 128m
+    cpus: 1.0
+    pids_limit: 128
+    shm_size: 64m
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    logging: &bounded_logs
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d saveswitch -h 127.0.0.1 -q"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  api:
+    # Built separately from server/Dockerfile, then selected by immutable ECR
+    # digest. The image itself runs as uid/gid 10001, not root.
+    image: ${SAVESWITCH_API_IMAGE:?SAVESWITCH_API_IMAGE must be an immutable digest}
+    pull_policy: missing
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+    env_file:
+      - ${API_ENV_FILE:?API_ENV_FILE must be a root-only runtime file}
+    environment:
+      NODE_ENV: production
+      SAVESWITCH_DEV_MODE: "false"
+      PORT: "5000"
+    # Host loopback is the only API publication. cloudflared is the intended
+    # ingress; Lightsail and UFW stay closed to 80, 443, 5000, and 5432.
+    ports:
+      - "127.0.0.1:5000:5000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    mem_limit: 128m
+    mem_reservation: 96m
+    cpus: 0.75
+    pids_limit: 96
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *bounded_logs
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:5000/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  cleanup:
+    image: ${SAVESWITCH_API_IMAGE:?SAVESWITCH_API_IMAGE must be an immutable digest}
+    pull_policy: missing
+    profiles: ["maintenance"]
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ${API_ENV_FILE:?API_ENV_FILE must be a root-only runtime file}
+    environment:
+      NODE_ENV: production
+      SAVESWITCH_DEV_MODE: "false"
+    command: ["bun", "src/jobs/cleanup-cli.ts"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+    mem_limit: 96m
+    mem_reservation: 64m
+    cpus: 0.5
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *bounded_logs
+
+secrets:
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE must be a root-only runtime file}
+
+# A fixed, dedicated bridge makes the host-to-container proxy peer explicit.
+# Preflight must prove this subnet does not overlap an existing host network.
+networks:
+  default:
+    name: saveswitch-runtime
+    ipam:
+      config:
+        - subnet: 172.30.250.0/24
+          gateway: 172.30.250.1

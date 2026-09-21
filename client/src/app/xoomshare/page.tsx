@@ -8,19 +8,12 @@ import styles from "./XoomshareEntry.module.css";
 
 export default function CreateXoomsharePage() {
   const router = useRouter();
-  const [pathCode, setPathCode] = useState("");
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
-  const normalizedPathCode = pathCode.trim();
-  const hasValidPathCode = /^[A-Za-z0-9_-]{12,48}$/.test(normalizedPathCode);
 
   const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError("");
-    if (!hasValidPathCode) {
-      setError("Use 12–48 letters, numbers, hyphens, or underscores.");
-      return;
-    }
     setCreating(true);
 
     try {
@@ -28,7 +21,7 @@ export default function CreateXoomsharePage() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pathCode: normalizedPathCode }),
+        body: JSON.stringify({}),
       });
       const data = await res.json();
 
@@ -60,35 +53,18 @@ export default function CreateXoomsharePage() {
         <form onSubmit={handleCreate} className={`${styles.card} flex w-full max-w-[420px] flex-col rounded-[26px] p-6 sm:p-8`}>
           <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#79796b]">Saveswitch</p>
           <h1 className="mt-2 text-[22px] font-semibold tracking-[-0.035em] text-[#34352e]">Create a Xoomshare room</h1>
-          <p className="mt-2 max-w-[320px] text-[13px] leading-5 text-[#68685d]">Choose a private, case-sensitive address for a live resource canvas.</p>
-          <label htmlFor="xoomshare-code" className="mt-7 text-[11px] font-semibold uppercase tracking-[0.13em] text-[#6f6e61]">Room address</label>
-          <div className={`${styles.input} mt-2 flex w-full items-center gap-2 pb-2 transition-colors`}>
-            <input
-              id="xoomshare-code"
-              value={pathCode}
-              onChange={(event) => setPathCode(event.target.value)}
-              autoFocus
-              autoComplete="off"
-              spellCheck={false}
-              minLength={12}
-              maxLength={48}
-              pattern="[A-Za-z0-9_-]{12,48}"
-              title="Use 12–48 letters, numbers, hyphens, or underscores."
-              placeholder="e.g. team_references"
-              className="h-10 min-w-0 flex-1 border-none bg-transparent px-0 text-[14px] font-medium leading-none text-[#35362f] !outline-none focus:!border-none focus:!outline-none focus:!ring-0 placeholder:text-[#949385]"
-              style={{ boxShadow: 'none', border: 'none', outline: 'none' }}
-              aria-label="Secret page code"
-            />
+          <p className="mt-2 max-w-[320px] text-[13px] leading-5 text-[#68685d]">Create a private live resource canvas. Saveswitch generates a secure, unguessable room address for you to share.</p>
+          <div className="mt-7 flex w-full items-center justify-between gap-4 rounded-2xl bg-white/45 px-4 py-3">
+            <p className="text-[12px] leading-5 text-[#68685d]">The room expires after three hours.</p>
             <button
               type="submit"
-              disabled={creating || !hasValidPathCode}
+              disabled={creating}
               className={`${styles.submit} flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-opacity disabled:cursor-not-allowed disabled:opacity-40`}
               aria-label="Create Xoomshare page"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" strokeWidth="1.6"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>
             </button>
           </div>
-          <p className="mt-3 text-[11px] text-[#7c7b6e]">12–48 letters, numbers, hyphens, or underscores · case sensitive · expires after three hours.</p>
 
           {error && (
             <p className="mt-5 w-full text-[12px] font-medium leading-[16px] text-[#d12a2a]" role="alert">

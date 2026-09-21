@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadRegionalLightsailMetadataAndExactGraph",
+      "Effect": "Allow",
+      "Action": [
+        "lightsail:GetBlueprints",
+        "lightsail:GetBundles",
+        "lightsail:GetDisk",
+        "lightsail:GetDisks",
+        "lightsail:GetInstance",
+        "lightsail:GetInstancePortStates",
+        "lightsail:GetInstances",
+        "lightsail:GetKeyPair",
+        "lightsail:GetKeyPairs",
+        "lightsail:GetOperation",
+        "lightsail:GetOperations",
+        "lightsail:GetRegions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalAccount": "065897469956",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "ReadExactEcrRepository",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:DescribeRepositories",
+        "ecr:GetLifecyclePolicy",
+        "ecr:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:065897469956:repository/saveswitch-production-api"
+    },
+    {
+      "Sid": "ReadExactAccountBudget",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ListTagsForResource",
+        "budgets:ViewBudget"
+      ],
+      "Resource": "arn:aws:budgets::065897469956:budget/saveswitch-account-monthly-25-usd"
+    },
+    {
+      "Sid": "ReadRegionalServiceQuotaMetadata",
+      "Effect": "Allow",
+      "Action": [
+        "servicequotas:GetAWSDefaultServiceQuota",
+        "servicequotas:GetServiceQuota",
+        "servicequotas:ListServiceQuotas"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalAccount": "065897469956",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    }
+  ]
+}

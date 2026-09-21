@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 import { tokenizeCode, type CodeTokenKind } from './codeHighlighting';
+import { getDownloadPath, getOwnerDownloadPath, isValidXoomsharePathCode } from '@/lib/downloadPath';
+import { API_BASE } from '@/lib/api';
 import styles from './ResourceCard.module.css';
 
 export interface Resource {
@@ -25,6 +27,7 @@ interface ResourceCardProps {
   onDelete?: (id: string) => void;
   onUpdateText?: (id: string, content: string) => Promise<void>;
   readOnly?: boolean;
+  xoomsharePathCode?: string;
 }
 
 const TOKEN_CLASS_NAMES: Record<CodeTokenKind, string | undefined> = {
@@ -117,7 +120,7 @@ function getSafeHttpUrl(value: string | null): string | null {
   }
 }
 
-export default function ResourceCard({ resource, onDelete, onUpdateText, readOnly = false }: ResourceCardProps) {
+export default function ResourceCard({ resource, onDelete, onUpdateText, readOnly = false, xoomsharePathCode }: ResourceCardProps) {
   const [copied, setCopied] = useState(false);
   const [textDraft, setTextDraft] = useState<{ baseContent: string; value: string } | null>(null);
   const [isSavingText, setIsSavingText] = useState(false);
@@ -135,6 +138,19 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
   const safeLinkHostname = resource.type === "link" && safeResourceUrl
     ? new URL(safeResourceUrl).hostname
     : "Unavailable link";
+  const validXoomsharePathCode = xoomsharePathCode && isValidXoomsharePathCode(xoomsharePathCode)
+    ? xoomsharePathCode
+    : undefined;
+  const usesApiHostAuthentication = !readOnly && !validXoomsharePathCode;
+  const downloadPath = usesApiHostAuthentication
+    ? getOwnerDownloadPath(resource.id, API_BASE)
+    : getDownloadPath(resource.id, validXoomsharePathCode);
+  const previewPath = usesApiHostAuthentication
+    ? getOwnerDownloadPath(resource.id, API_BASE, true)
+    : downloadPath;
+  const downloadLinkLabel = validXoomsharePathCode
+    ? 'Copy Xoomshare download link'
+    : 'Copy download address (access required)';
 
   useEffect(() => {
     if (showHighlight) {
@@ -267,45 +283,35 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
     }
   };
 
-  const handleDownloadFile = async (url: string, filename: string, type: Resource["type"]) => {
-    const safeUrl = getSafeResourceUrl(url, type);
-    if (!safeUrl) return;
-    try {
-      const res = await fetch(safeUrl);
-      const blob = await res.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
-    } catch (e) {
-      console.error("Failed to download file", e);
-      window.open(safeUrl, '_blank', 'noopener,noreferrer');
-    }
+  const handleDownloadFile = () => {
+    const anchor = document.createElement('a');
+    anchor.href = downloadPath;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
   };
 
-  const handlePreview = async (url: string, rtype: 'pdf' | 'file') => {
-    const safeUrl = getSafeResourceUrl(url, rtype);
-    if (!safeUrl) return;
+  const handlePreview = async (rtype: 'pdf' | 'file') => {
+    if (usesApiHostAuthentication) {
+      window.open(previewPath, '_blank', 'noopener,noreferrer');
+      return;
+    }
     if (rtype === 'file') {
-      window.open(safeUrl, '_blank', 'noopener,noreferrer');
+      window.open(downloadPath, '_blank', 'noopener,noreferrer');
       return;
     }
     const newWindow = window.open('', '_blank');
     if (newWindow) {
       newWindow.document.body.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;">Loading PDF preview...</div>';
       try {
-        const res = await fetch(safeUrl);
+        const res = await fetch(downloadPath);
+        if (!res.ok) throw new Error('Unable to load PDF preview');
         const blob = await res.blob();
         const pdfBlob = new Blob([blob], { type: 'application/pdf' });
         const blobUrl = URL.createObjectURL(pdfBlob);
         newWindow.location.href = blobUrl;
       } catch {
-        newWindow.close();
-        window.open(safeUrl, '_blank', 'noopener,noreferrer');
+        newWindow.location.href = downloadPath;
       }
     }
   };
@@ -354,7 +360,7 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/icons/icon-image.svg" alt="" className={styles.actionIcon} />
               </button>
-              <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleDownloadFile(resource.content, resource.title || 'image.png', 'image'); }} className={styles.actionButton} title="Download image" aria-label="Download image">
+              <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); handleDownloadFile(); }} className={styles.actionButton} title="Download image" aria-label="Download image">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/icons/icon-download.svg" alt="" className={styles.actionIcon} />
               </button>
@@ -375,13 +381,13 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
             <div className={styles.documentFooter}>
               <h3 className={styles.documentTitle}>{resource.title || 'Document.pdf'}</h3>
               <div className={styles.actionBar}>
-                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handlePreview(resource.content, 'pdf'); }} className={styles.actionButton} title="Preview PDF" aria-label="Preview PDF">
+                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handlePreview('pdf'); }} className={styles.actionButton} title="Preview PDF" aria-label="Preview PDF">
                   <img src="/icons/icon-document.svg" alt="" className={styles.actionIcon} />
                 </button>
-                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleDownloadFile(resource.content, resource.title || 'document.pdf', 'pdf'); }} className={styles.actionButton} title="Download PDF" aria-label="Download PDF">
+                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); handleDownloadFile(); }} className={styles.actionButton} title="Download PDF" aria-label="Download PDF">
                   <img src="/icons/icon-download.svg" alt="" className={styles.actionIcon} />
                 </button>
-                <button type="button" onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleCopy(`${window.location.origin}/link/download/${resource.id}`); }} className={styles.actionButton} title={copied ? "Download link copied" : "Copy download link"} aria-label={copied ? "Download link copied" : "Copy download link"}>
+                <button type="button" onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleCopy(new URL(downloadPath, window.location.origin).toString()); }} className={styles.actionButton} title={copied ? "Download address copied" : downloadLinkLabel} aria-label={copied ? "Download address copied" : downloadLinkLabel}>
                   <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="" className={styles.actionIcon} />
                 </button>
               </div>
@@ -403,13 +409,13 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
             <div className={styles.documentFooter}>
               <h3 className={`${styles.documentTitle} ${styles.breakableTitle}`}>{resource.title || 'Document.file'}</h3>
               <div className={styles.actionBar}>
-                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handlePreview(resource.content, 'file'); }} className={styles.actionButton} title="Open file" aria-label="Open file">
+                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handlePreview('file'); }} className={styles.actionButton} title="Open file" aria-label="Open file">
                   <img src="/icons/icon-document.svg" alt="" className={styles.actionIcon} />
                 </button>
-                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleDownloadFile(resource.content, resource.title || 'file', 'file'); }} className={styles.actionButton} title="Download file" aria-label="Download file">
+                <button type="button" disabled={!safeResourceUrl} onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); handleDownloadFile(); }} className={styles.actionButton} title="Download file" aria-label="Download file">
                   <img src="/icons/icon-download.svg" alt="" className={styles.actionIcon} />
                 </button>
-                <button type="button" onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleCopy(`${window.location.origin}/link/download/${resource.id}`); }} className={styles.actionButton} title={copied ? "Download link copied" : "Copy download link"} aria-label={copied ? "Download link copied" : "Copy download link"}>
+                <button type="button" onPointerDown={stopInteractivePointerEvent} onClick={(event) => { stopInteractiveClick(event); void handleCopy(new URL(downloadPath, window.location.origin).toString()); }} className={styles.actionButton} title={copied ? "Download address copied" : downloadLinkLabel} aria-label={copied ? "Download address copied" : downloadLinkLabel}>
                   <img src={copied ? "/icons/icon-check.svg" : "/icons/icon-copy.svg"} alt="" className={styles.actionIcon} />
                 </button>
               </div>

@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageExactAccountBudget",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ModifyBudget",
+        "budgets:TagResource",
+        "budgets:UntagResource"
+      ],
+      "Resource": "arn:aws:budgets::065897469956:budget/saveswitch-account-monthly-25-usd"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { boolean, index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { boolean, check, index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
   id: text('id').primaryKey(), // using Google sub ID which is a string
@@ -8,7 +8,9 @@ export const users = pgTable('users', {
   name: text('name').notNull(),
   picture: text('picture').notNull(),
   visibility: text('visibility', { enum: ['public', 'private'] }).default('public').notNull(),
-});
+}, (table) => [
+  check('users_visibility_check', sql`${table.visibility} in ('public', 'private')`),
+]);
 
 export const pages = pgTable('pages', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -28,6 +30,9 @@ export const pages = pgTable('pages', {
     .on(table.pathCode)
     .where(sql`${table.pathCode} is not null`),
   index('pages_session_id_idx').on(table.sessionId),
+  check('pages_visibility_check', sql`${table.visibility} in ('public', 'private')`),
+  check('pages_xoomshare_resource_count_nonnegative', sql`${table.resourceCount} >= 0`),
+  check('pages_xoomshare_resource_bytes_nonnegative', sql`${table.resourceBytes} >= 0`),
 ]);
 
 export const resources = pgTable('resources', {
@@ -49,6 +54,13 @@ export const resources = pgTable('resources', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => [
   index('resources_page_id_idx').on(table.pageId),
+  check('resources_type_check', sql`${table.type} in ('link', 'image', 'text', 'pdf', 'file')`),
+  check('resources_size_bytes_nonnegative', sql`${table.sizeBytes} >= 0`),
+  check(
+    'resources_provider_pair_check',
+    sql`(${table.providerPublicId} is null and ${table.providerResourceType} is null)
+      or (${table.providerPublicId} is not null and ${table.providerResourceType} in ('image', 'raw'))`,
+  ),
 ]);
 
 /** Durable cleanup work for Cloudinary assets after the referring row is gone. */
@@ -63,4 +75,6 @@ export const assetDeletionQueue = pgTable('asset_deletion_queue', {
 }, (table) => [
   uniqueIndex('asset_deletion_queue_provider_public_id_unique').on(table.providerPublicId),
   index('asset_deletion_queue_created_at_idx').on(table.createdAt),
+  check('asset_deletion_queue_provider_resource_type_check', sql`${table.providerResourceType} in ('image', 'raw')`),
+  check('asset_deletion_queue_attempts_nonnegative', sql`${table.attempts} >= 0`),
 ]);

@@ -1,0 +1,16 @@
+aws_account_id            = "065897469956"
+aws_region                = "us-east-1"
+environment               = "production"
+availability_zone         = "us-east-1a"
+instance_blueprint_id     = "ubuntu_24_04"
+instance_bundle_id        = "nano_3_0"
+database_disk_size_gb     = 16
+operator_ssh_public_key   = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY operator"
+admin_ipv4_cidrs          = ["203.0.113.10/32"]
+automatic_snapshot_utc_hour = 4
+monthly_budget_usd        = 25
+budget_alert_email        = "owner@example.com"
+
+additional_tags = {
+  Owner = "saveswitch-owner"
+}

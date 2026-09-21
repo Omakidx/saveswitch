@@ -52,6 +52,21 @@ export class SocketQueryBudget {
   }
 }
 
+export const XOOMSHARE_WEBSOCKET_MAX_PAYLOAD_BYTES = 4 * 1024
+export const XOOMSHARE_WEBSOCKET_MESSAGE_LIMIT = 120
+
+export const parseXoomshareSocketMessage = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== 'string' || utf8ByteLength(value) > XOOMSHARE_WEBSOCKET_MAX_PAYLOAD_BYTES) return null
+  try {
+    const parsed = JSON.parse(value)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    if (parsed.type !== 'ping' && parsed.type !== 'subscribe') return null
+    return parsed as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
 export const XOOMSHARE_MAX_RESOURCES = 60
 export const XOOMSHARE_MAX_RESOURCE_BYTES = 100 * 1024 * 1024
 export const XOOMSHARE_MAX_TITLE_BYTES = 512

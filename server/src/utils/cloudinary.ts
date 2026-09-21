@@ -137,7 +137,8 @@ export async function uploadImage(base64Image: string): Promise<string> {
       )
     }
 
-    console.error('Cloudinary upload error:', error)
+    // Provider errors may include request metadata or asset identifiers.
+    console.error('Cloudinary profile upload failed')
     throw new ImageUploadError()
   }
 }
@@ -292,7 +293,8 @@ export async function uploadResourceAsset(
       throw new CloudinaryConfigurationError('Cloudinary credentials were rejected. Check the configured upload credentials.')
     }
 
-    console.error('Cloudinary resource upload error:', error)
+    // Provider errors may include request metadata or asset identifiers.
+    console.error('Cloudinary resource upload failed')
     throw new ResourceUploadError()
   }
 }
@@ -311,8 +313,10 @@ export async function destroyUploadedResourceAsset(asset: UploadedResourceAsset)
       invalidate: true,
     })
     return true
-  } catch (error) {
-    console.error('Cloudinary resource cleanup error:', error)
+  } catch {
+    // Provider errors may include request metadata or identifiers. The caller
+    // records only a generic retry status and the one-shot job emits counts.
+    console.error('Cloudinary resource cleanup failed')
     return false
   }
 }

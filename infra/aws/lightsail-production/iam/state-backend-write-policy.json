@@ -1,0 +1,46 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadWriteOnlyProposedStateAndLockObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::saveswitch-terraform-state-065897469956/lightsail-production/core.tfstate",
+        "arn:aws:s3:::saveswitch-terraform-state-065897469956/lightsail-production/core.tfstate.tflock"
+      ]
+    },
+    {
+      "Sid": "ReleaseOnlyProposedStateLock",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::saveswitch-terraform-state-065897469956/lightsail-production/core.tfstate.tflock"
+    },
+    {
+      "Sid": "UseExactStateKeyOnlyThroughStateBucket",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "arn:aws:kms:us-east-1:065897469956:key/2b923daa-87c6-491d-aca2-8ecc46aef866",
+      "Condition": {
+        "StringEquals": {
+          "kms:CallerAccount": "065897469956",
+          "kms:ViaService": "s3.us-east-1.amazonaws.com"
+        },
+        "StringLike": {
+          "kms:EncryptionContext:aws:s3:arn": [
+            "arn:aws:s3:::saveswitch-terraform-state-065897469956",
+            "arn:aws:s3:::saveswitch-terraform-state-065897469956/lightsail-production/core.tfstate",
+            "arn:aws:s3:::saveswitch-terraform-state-065897469956/lightsail-production/core.tfstate.tflock"
+          ]
+        }
+      }
+    }
+  ]
+}

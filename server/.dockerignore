@@ -1,5 +1,34 @@
-node_modules
+# Local dependencies and credentials
+node_modules/
 .env
 .env.*
-*.log
+*.env
+
+# Repository, editor, and generated artifacts
+.git/
 *.orig
+*.log
+*.map
+*.data
+data/
+
+# Development databases, exports, and source data not needed by the runtime
+.saveswitch-dev-db/
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+*.sql
+neon.db.md
+
+# Test-only sources and infrastructure artifacts
+src/**/*.test.ts
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+*.tfvars
+*.tfvars.json

@@ -9,3 +9,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+
+# Secret files
+neon.db.md*

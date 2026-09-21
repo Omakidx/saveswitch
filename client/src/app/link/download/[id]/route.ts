@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { API_BASE } from '@/lib/api';
+import { isValidXoomsharePathCode } from '@/lib/downloadPath';
 
 type DownloadResource = {
   type?: unknown;
@@ -9,6 +10,14 @@ type DownloadResource = {
 
 const DATA_URL_PATTERN = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/i;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const RESOURCE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function notFoundResponse() {
+  return new NextResponse('Resource not found', {
+    status: 404,
+    headers: { 'Cache-Control': 'private, no-store' },
+  });
+}
 
 function isAllowedDataMime(type: string, mimeType: string) {
   if (type === 'image') return SAFE_IMAGE_MIME_TYPES.has(mimeType);
@@ -37,14 +46,14 @@ function attachmentResponse(resource: DownloadResource) {
     typeof resource.content !== 'string' ||
     !['image', 'pdf', 'file'].includes(resource.type)
   ) {
-    return new NextResponse('Resource is not downloadable', { status: 400 });
+    return notFoundResponse();
   }
 
   const dataMatch = DATA_URL_PATTERN.exec(resource.content);
   if (dataMatch) {
     const mimeType = dataMatch[1]!.toLowerCase();
     if (!isAllowedDataMime(resource.type, mimeType)) {
-      return new NextResponse('Resource is not downloadable', { status: 400 });
+      return notFoundResponse();
     }
 
     const bytes = Buffer.from(dataMatch[2]!, 'base64');
@@ -63,34 +72,52 @@ function attachmentResponse(resource: DownloadResource) {
   try {
     const url = new URL(resource.content);
     if (url.protocol !== 'https:') {
-      return new NextResponse('Resource is not downloadable', { status: 400 });
+      return notFoundResponse();
     }
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(url, {
+      status: 302,
+      headers: {
+        'Cache-Control': 'private, no-store',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
   } catch {
-    return new NextResponse('Resource is not downloadable', { status: 400 });
+    return notFoundResponse();
   }
 }
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
+export const dynamic = 'force-dynamic';
+
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-    return new NextResponse('Resource not found', { status: 404 });
+  if (!RESOURCE_ID_PATTERN.test(id)) return notFoundResponse();
+
+  const xoomsharePathCodes = new URL(request.url).searchParams.getAll('xoomshare');
+  if (xoomsharePathCodes.length > 1) return notFoundResponse();
+
+  const xoomsharePathCode = xoomsharePathCodes[0];
+  if (xoomsharePathCode !== undefined && !isValidXoomsharePathCode(xoomsharePathCode)) {
+    return notFoundResponse();
   }
 
   try {
-    const res = await fetch(`${API_BASE}/resources/${id}`);
-    if (!res.ok) {
-      return new NextResponse('Resource not found', { status: 404 });
-    }
+    const headers = new Headers();
+    if (xoomsharePathCode) headers.set('x-saveswitch-xoomshare-path', xoomsharePathCode);
+
+    const res = await fetch(`${API_BASE}/resources/${encodeURIComponent(id)}`, {
+      cache: 'no-store',
+      headers,
+      // Do not follow an unexpected upstream redirect from the metadata endpoint.
+      redirect: 'manual',
+    });
+    if (!res.ok) return notFoundResponse();
 
     const data = await res.json();
-    if (!data.success || !data.resource) {
-      return new NextResponse('Resource not found', { status: 404 });
-    }
+    if (!data.success || !data.resource) return notFoundResponse();
 
     return attachmentResponse(data.resource as DownloadResource);
-  } catch (error) {
-    console.error('Error fetching resource:', error);
-    return new NextResponse('Internal Server Error', { status: 500 });
+  } catch {
+    return notFoundResponse();
   }
 }

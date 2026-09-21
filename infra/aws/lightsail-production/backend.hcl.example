@@ -1,0 +1,6 @@
+bucket       = "saveswitch-terraform-state-065897469956"
+key          = "lightsail-production/core.tfstate"
+region       = "us-east-1"
+encrypt      = true
+kms_key_id   = "arn:aws:kms:us-east-1:065897469956:key/2b923daa-87c6-491d-aca2-8ecc46aef866"
+use_lockfile = true

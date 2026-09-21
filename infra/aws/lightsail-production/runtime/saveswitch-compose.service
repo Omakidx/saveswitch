@@ -1,0 +1,18 @@
+[Unit]
+Description=Saveswitch PostgreSQL and API Compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/saveswitch/runtime
+ExecStartPre=/usr/bin/docker compose --env-file /etc/saveswitch/runtime/runtime.env config --quiet
+ExecStart=/usr/bin/docker compose --env-file /etc/saveswitch/runtime/runtime.env up --detach --wait --remove-orphans
+ExecStop=/usr/bin/docker compose --env-file /etc/saveswitch/runtime/runtime.env stop --timeout 60
+TimeoutStartSec=180
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

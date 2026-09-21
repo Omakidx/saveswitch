@@ -269,7 +269,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       socket = new WebSocket(`${API_BASE.replace(/^http/, "ws")}/ws`);
       socket.onopen = () => {
         reconnectAttempt = 0;
-        socket?.send(JSON.stringify({ type: "subscribe", pageId: room.id }));
+        socket?.send(JSON.stringify({ type: "subscribe", pageId: room.id, pathCode }));
         pingInterval = window.setInterval(() => {
           if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping" }));
         }, 30000);
@@ -304,7 +304,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       if (retryTimer) window.clearTimeout(retryTimer);
       socket?.close();
     };
-  }, [applyRoomData, fetchRoom, room?.id]);
+  }, [applyRoomData, fetchRoom, pathCode, room?.id]);
 
   const expiryRemainingMs = (() => {
     if (!room?.expires_at) return null;
@@ -1050,6 +1050,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
                 canManageResource={(resource) => Boolean(room.isOwner || resource.isOwner)}
                 highlightedResourceId={highlightedResourceId}
                 readOnly={!canAddResources}
+                xoomsharePathCode={pathCode}
               />
             </div>
           </InfiniteCanvas>

@@ -22,6 +22,7 @@ interface CardStackProps {
   onResourceDragStateChange?: (isDragging: boolean) => void;
   highlightedResourceId?: string | null;
   readOnly?: boolean;
+  xoomsharePathCode?: string;
 }
 
 const CARD_SHADOWS = [
@@ -32,7 +33,7 @@ const CARD_SHADOWS = [
   "0px 8px 24px 0px rgba(0,0,0,0.1), 0px 1px 2px 0px rgba(0,0,0,0.06)",
 ];
 
-export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition, onUpdateTextResource, canManageResource, onResourceDragStateChange, highlightedResourceId, readOnly = false }: CardStackProps) {
+export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition, onUpdateTextResource, canManageResource, onResourceDragStateChange, highlightedResourceId, readOnly = false, xoomsharePathCode }: CardStackProps) {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
@@ -311,6 +312,7 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
                             onDelete={resourceReadOnly ? undefined : onDeleteResource}
                             onUpdateText={resourceReadOnly ? undefined : onUpdateTextResource}
                             readOnly={resourceReadOnly}
+                            xoomsharePathCode={xoomsharePathCode}
                           />
                         </motion.div>
                       );

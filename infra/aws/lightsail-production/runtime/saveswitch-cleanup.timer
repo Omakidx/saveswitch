@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Saveswitch cleanup every day
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=saveswitch-cleanup.service
+
+[Install]
+WantedBy=timers.target

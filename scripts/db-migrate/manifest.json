@@ -1,0 +1,35 @@
+{
+  "format": 1,
+  "migrations": [
+    {
+      "version": "0000",
+      "name": "canonical-baseline",
+      "path": "../db-merge/sql/canonical-schema.sql",
+      "sha256": "b3c7b77b8e6356651556b26c639fd889d6d09ed49c3fafed41ac31ec7caa82bc"
+    },
+    {
+      "version": "0001",
+      "name": "xoomshare-rooms",
+      "path": "../../server/drizzle/0001_xoomshare_rooms.sql",
+      "sha256": "eb05f6eac5c4eb63cf467fe5b7a2bd93f9bbfec07d3e62d6ad3885470d507da9"
+    },
+    {
+      "version": "0002",
+      "name": "xoomshare-guest-ownership",
+      "path": "../../server/drizzle/0002_xoomshare_guest_ownership.sql",
+      "sha256": "eaa254064b0760eafbc5f81bb6e02fd5dbe18f21f07ac1c5141f8e8833105c1b"
+    },
+    {
+      "version": "0003",
+      "name": "xoomshare-resource-quotas",
+      "path": "../../server/drizzle/0003_xoomshare_resource_quotas.sql",
+      "sha256": "a66daccf6fe2ffd0b238b607faa22b9d2e9efdccfca337c35f150061a7d4bbbd"
+    },
+    {
+      "version": "0004",
+      "name": "asset-deletion-queue",
+      "path": "../../server/drizzle/0004_asset_deletion_queue.sql",
+      "sha256": "6a692d84ae50c35c3fed846c42d64e0bcc51bb3bcf343016750296e4bf82ac72"
+    }
+  ]
+}

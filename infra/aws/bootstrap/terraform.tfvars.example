@@ -1,0 +1,6 @@
+aws_account_id   = "123456789012"
+state_bucket_name = "saveswitch-terraform-state-123456789012"
+
+tags = {
+  Owner = "platform"
+}

@@ -3,16 +3,13 @@ import { cors } from '@elysiajs/cors'
 import { jwt } from '@elysiajs/jwt'
 import { db } from './db'
 import { assetDeletionQueue, users, pages, resources } from './db/schema'
-import { eq, and, inArray, isNotNull, lt, sql } from 'drizzle-orm'
+import { eq, and, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm'
 import {
   CloudinaryConfigurationError,
   ImageUploadError,
   ImageValidationError,
   ResourceUploadError,
   ResourceUploadValidationError,
-  cleanupUncommittedResourceAsset,
-  destroyUploadedResourceAsset,
-  getAssetDeletionQueueOutcome,
   getResourceDataUrlByteLength,
   uploadImage,
   uploadResourceAsset,
@@ -29,7 +26,6 @@ import {
   generateXoomsharePathCode,
   normalizeXoomsharePathCode,
   resolveXoomshareParticipant,
-  XoomsharePathCodeError,
   xoomshareCookieName,
 } from './xoomshare-auth'
 import {
@@ -38,6 +34,7 @@ import {
   isWithinUtf8ByteLimit,
   SocketQueryBudget,
   isXoomsharePageId,
+  parseXoomshareSocketMessage,
   truncateUtf8,
   utf8ByteLength,
   XOOMSHARE_MAX_DESCRIPTION_BYTES,
@@ -45,8 +42,16 @@ import {
   XOOMSHARE_MAX_RESOURCE_BYTES,
   XOOMSHARE_MAX_RESOURCES,
   XOOMSHARE_MAX_TITLE_BYTES,
+  XOOMSHARE_WEBSOCKET_MAX_PAYLOAD_BYTES,
+  XOOMSHARE_WEBSOCKET_MESSAGE_LIMIT,
 } from './xoomshare-security'
-import { getExpiredXoomshareRoomCondition } from './xoomshare-expiry'
+import { canReadResource } from './resource-access'
+import { checkDatabaseReadiness } from './readiness'
+import { installGracefulShutdown } from './shutdown'
+import { createDownloadResponse } from './download-response'
+import { reportProfileUpdateFailure } from './profile-update-error'
+import { logOperationalFailure } from './operational-log'
+import { withTrustedRequestAddress } from './trusted-request-address'
 
 // ── Types for Google API responses ──
 interface GoogleTokenResponse {
@@ -162,7 +167,6 @@ const DEV_USER = {
 }
 const XOOMSHARE_TTL_HOURS = 3
 const XOOMSHARE_TTL_MS = XOOMSHARE_TTL_HOURS * 60 * 60 * 1000
-const XOOMSHARE_CLEANUP_INTERVAL_MS = 60 * 1000
 const XOOMSHARE_COOKIE_SECURE = !isLocalDevelopmentOrigin
 const MAX_XOOMSHARE_TEXT_LENGTH = 100_000
 const RESERVED_PATH_CODES = new Set([
@@ -175,10 +179,6 @@ const RESERVED_PATH_CODES = new Set([
   'register',
   'xoomshare',
 ])
-
-type XoomshareCreateBody = {
-  pathCode?: unknown
-}
 
 const getEffectiveXoomshareExpiresAt = (page: typeof pages.$inferSelect) => {
   if (!page.sessionId && !page.expiresAt) return null
@@ -295,23 +295,27 @@ const XOOMSHARE_RATE_LIMITS = {
   websocket: { limit: 30, windowMs: 60 * 1000 },
 } as const
 
-const getXoomshareRequestAddress = (request: Request) => {
-  // requestIP reads Bun's accepted socket address. Do not use X-Forwarded-For
-  // or client supplied identifiers here unless a trusted proxy boundary is set.
-  return app.server?.requestIP(request)?.address ?? 'unknown'
-}
-
 const enforceXoomshareRateLimit = (
   request: Request,
   set: any,
   scope: keyof typeof XOOMSHARE_RATE_LIMITS,
 ) => {
   const policy = XOOMSHARE_RATE_LIMITS[scope]
-  const decision = xoomshareRateLimiter.consume(
-    `${scope}:${getXoomshareRequestAddress(request)}`,
+  const rateLimit = withTrustedRequestAddress({
+    peerAddress: app.server?.requestIP(request)?.address,
+    cfConnectingIp: request.headers.get('cf-connecting-ip'),
+    trustedProxyPeers: runtimeConfig.trustedProxyPeers,
+  }, (address) => xoomshareRateLimiter.consume(
+    `${scope}:${address}`,
     policy.limit,
     policy.windowMs,
-  )
+  ))
+  if (!rateLimit.ok) {
+    set.status = 400
+    return false
+  }
+
+  const decision = rateLimit.value
   if (decision.allowed) return true
 
   set.status = 429
@@ -353,7 +357,7 @@ const publishXoomshareUpdate = (roomId: string, event: Record<string, unknown>) 
   } catch (error) {
     // Do not let a post-commit websocket failure cause a caller to believe
     // that a persisted mutation failed (or trigger quota compensation).
-    console.error('Publish Xoomshare update failed:', error)
+    logOperationalFailure('Publish Xoomshare update failed', error)
   }
 }
 
@@ -372,87 +376,21 @@ const enqueueRemoteAssetDeletions = async (tx: any, assets: Array<{
 
 const queueFailedUncommittedAssetCleanup = async (asset: UploadedResourceAsset | null) => {
   if (!asset?.publicId) return
-  let cleaned = false
-  try {
-    cleaned = await cleanupUncommittedResourceAsset(asset)
-  } catch (error) {
-    console.error('Immediate Cloudinary cleanup failed:', error)
-  }
-  if (cleaned) return
   try {
     await db.insert(assetDeletionQueue).values({
       providerPublicId: asset.publicId,
       providerResourceType: asset.resourceType,
     }).onConflictDoNothing()
   } catch (error) {
-    // Preserve the original request error; startup/periodic cleanup cannot help
-    // if the database itself is unavailable, so this is explicitly observable.
-    console.error('Failed to persist Cloudinary cleanup retry:', error)
+    // Preserve the original request error. The explicit cleanup job will pick
+    // up durable work once the database is available again.
+    console.error('Failed to persist Cloudinary cleanup retry')
   }
 }
-
-/** Cloudinary destroy is idempotent; a duplicate worker can safely retry it. */
-const drainAssetDeletionQueue = async (limit = 25) => {
-  const pending = await db.select().from(assetDeletionQueue).limit(limit)
-  for (const item of pending) {
-    const removed = await destroyUploadedResourceAsset({
-      url: '',
-      publicId: item.providerPublicId,
-      resourceType: item.providerResourceType,
-    })
-    const outcome = getAssetDeletionQueueOutcome(removed)
-    if (outcome.remove) {
-      await db.delete(assetDeletionQueue).where(and(
-        eq(assetDeletionQueue.id, item.id),
-        eq(assetDeletionQueue.providerPublicId, item.providerPublicId),
-      ))
-    } else if (outcome.incrementAttempts) {
-      await db.update(assetDeletionQueue).set({
-        attempts: sql`${assetDeletionQueue.attempts} + 1`,
-        lastError: 'Cloudinary destroy failed; retry scheduled',
-        updatedAt: new Date(),
-      }).where(eq(assetDeletionQueue.id, item.id))
-    }
-  }
-}
-
-const cleanupExpiredXoomshareRooms = async () => {
-  try {
-    const candidates = await db.select().from(pages)
-      .where(getExpiredXoomshareRoomCondition(new Date(), XOOMSHARE_TTL_MS))
-    let deletedCount = 0
-    for (const candidate of candidates) {
-      deletedCount += await db.transaction(async (tx) => {
-        const [lockedRoot] = await tx.update(pages).set({ resourceCount: sql`${pages.resourceCount}` })
-          .where(eq(pages.id, candidate.id)).returning()
-        if (!lockedRoot || !isPageExpired(lockedRoot)) return 0
-        const roomPages = await tx.select({ id: pages.id }).from(pages).where(eq(pages.sessionId, lockedRoot.sessionId!))
-        const pageIds = roomPages.map((page) => page.id)
-        const assets = pageIds.length === 0 ? [] : await tx.select({
-          providerPublicId: resources.providerPublicId,
-          providerResourceType: resources.providerResourceType,
-        }).from(resources).where(inArray(resources.pageId, pageIds))
-        await enqueueRemoteAssetDeletions(tx, assets)
-        const deletedPages = await tx.delete(pages).where(eq(pages.sessionId, lockedRoot.sessionId!)).returning({ id: pages.id })
-        return deletedPages.length
-      })
-    }
-    if (deletedCount > 0) {
-      console.log(`Deleted ${deletedCount} expired Xoomshare page(s)`)
-    }
-    await drainAssetDeletionQueue()
-  } catch (error) {
-    console.error('Expired Xoomshare cleanup failed:', error)
-  }
-}
-
-void cleanupExpiredXoomshareRooms()
-setInterval(() => {
-  void cleanupExpiredXoomshareRooms()
-}, XOOMSHARE_CLEANUP_INTERVAL_MS)
 
 const xoomshareSocketTopics = new WeakMap<object, string>()
 const xoomshareSocketQueryBudget = new SocketQueryBudget()
+const xoomshareSocketMessageBudget = new SocketQueryBudget()
 const isAllowedXoomshareSocketOrigin = (request: Request) => {
   return request.headers.get('origin') === CLIENT_ORIGIN
 }
@@ -478,6 +416,9 @@ const app = new Elysia()
     }
   })
   .ws('/ws', {
+    maxPayloadLength: XOOMSHARE_WEBSOCKET_MAX_PAYLOAD_BYTES,
+    backpressureLimit: 64 * 1024,
+    closeOnBackpressureLimit: true,
     beforeHandle({ request, set }) {
       if (!isAllowedXoomshareSocketOrigin(request)) {
         set.status = 403
@@ -487,28 +428,58 @@ const app = new Elysia()
         return { success: false, error: 'Too many WebSocket connection attempts. Please try again later.' }
       }
     },
-    async message(ws, message: any) {
-      let msg = message;
-      if (typeof message === 'string') {
-        try { msg = JSON.parse(message); } catch {}
+    async message(ws, message: unknown) {
+      if (!xoomshareSocketMessageBudget.consume(ws as object, XOOMSHARE_WEBSOCKET_MESSAGE_LIMIT, 60 * 1000)) {
+        ws.close(1008, 'Message rate limit exceeded')
+        return
       }
+      if (typeof message !== 'string') {
+        ws.close(1003, 'Text messages only')
+        return
+      }
+      const msg = parseXoomshareSocketMessage(message)
+      if (!msg || msg.type === 'ping') return
       if (typeof msg === 'object' && msg !== null && msg.type === 'subscribe') {
         if (!isXoomsharePageId(msg.pageId)) return
         if (!xoomshareSocketQueryBudget.consume(ws as object, 8, 60 * 1000)) {
           ws.close(1008, 'Subscription query limit exceeded')
           return
         }
-        const [targetPage] = await db.select({ sessionId: pages.sessionId })
-          .from(pages)
-          .where(eq(pages.id, msg.pageId))
-          .limit(1)
-        if (!targetPage?.sessionId) return
 
-        const [room] = await db.select({ expiresAt: pages.expiresAt, createdAt: pages.createdAt, sessionId: pages.sessionId })
-          .from(pages)
-          .where(and(eq(pages.sessionId, targetPage.sessionId), isNotNull(pages.pathCode)))
-          .limit(1)
-        if (!room || isPageExpired(room as typeof pages.$inferSelect)) return
+        if (typeof msg.pathCode === 'string') {
+          let pathCode: string
+          try {
+            pathCode = normalizeXoomsharePathCode({ value: msg.pathCode, reservedPathCodes: RESERVED_PATH_CODES })
+          } catch {
+            return
+          }
+          const [targetPage] = await db.select({ sessionId: pages.sessionId })
+            .from(pages)
+            .where(eq(pages.id, msg.pageId))
+            .limit(1)
+          if (!targetPage?.sessionId) return
+
+          const [room] = await db.select({ expiresAt: pages.expiresAt, createdAt: pages.createdAt, sessionId: pages.sessionId, pathCode: pages.pathCode })
+            .from(pages)
+            .where(and(eq(pages.sessionId, targetPage.sessionId), eq(pages.pathCode, pathCode)))
+            .limit(1)
+          if (!room || isPageExpired(room as typeof pages.$inferSelect)) return
+        } else {
+          // Public profile updates are a distinct, non-capability subscription:
+          // both the normal page and its owning user must remain public.
+          const [publicPage] = await db.select({ id: pages.id })
+            .from(pages)
+            .innerJoin(users, eq(pages.userId, users.id))
+            .where(and(
+              eq(pages.id, msg.pageId),
+              eq(pages.visibility, 'public'),
+              eq(users.visibility, 'public'),
+              isNotNull(pages.userId),
+              isNull(pages.sessionId),
+            ))
+            .limit(1)
+          if (!publicPage) return
+        }
 
         const previousTopic = xoomshareSocketTopics.get(ws as object)
         if (previousTopic && previousTopic !== `page_${msg.pageId}`) {
@@ -525,6 +496,11 @@ const app = new Elysia()
     status: 'running',
   }))
   .get('/health', () => ({ status: 'ok', devMode: DEV_MODE, timestamp: new Date().toISOString() }))
+  .get('/ready', async ({ set }) => {
+    const ready = await checkDatabaseReadiness(db, sql`SELECT 1`)
+    if (!ready) set.status = 503
+    return { status: ready ? 'ready' : 'not_ready' }
+  })
 
   // Local-only development session. This route is unavailable outside an
   // explicitly enabled development server on a loopback client origin.
@@ -559,7 +535,7 @@ const app = new Elysia()
 
       return { success: true, user: DEV_USER }
     } catch (error) {
-      console.error('Development sign-in failed:', error)
+      logOperationalFailure('Development sign-in failed', error)
       set.status = 500
       return { success: false, error: 'Unable to start the development session.' }
     }
@@ -671,7 +647,7 @@ const app = new Elysia()
 
       return redirect(`${CLIENT_ORIGIN}/dashboard`)
     } catch (err) {
-      console.error('OAuth callback error:', err)
+      logOperationalFailure('OAuth callback failed', err)
       return redirect(`${CLIENT_ORIGIN}/login?error=callback_failed`)
     }
   })
@@ -828,25 +804,9 @@ const app = new Elysia()
       set.status = 400
       return { success: false, error: 'No data to update' }
     } catch (e: unknown) {
-      console.error(e)
-
-      if (e instanceof ImageValidationError) {
-        set.status = 400
-        return { success: false, error: e.message }
-      }
-
-      if (e instanceof CloudinaryConfigurationError) {
-        set.status = 500
-        return { success: false, error: e.message }
-      }
-
-      if (e instanceof ImageUploadError) {
-        set.status = 502
-        return { success: false, error: e.message }
-      }
-
-      set.status = 500
-      return { success: false, error: e instanceof Error ? e.message : 'server error' }
+      const failure = reportProfileUpdateFailure(e)
+      set.status = failure.status
+      return { success: false, error: failure.error }
     }
   })
 
@@ -884,23 +844,18 @@ const app = new Elysia()
   // ══════════════════════════════════════════════
 
   // ── POST /xoomshare — Create an anonymous room ──
-  .post('/xoomshare', async ({ body, request, set }) => {
+  .post('/xoomshare', async ({ request, set }) => {
     try {
       if (!enforceXoomshareRateLimit(request, set, 'create')) {
         return { success: false, error: 'Too many room creation attempts. Please try again later.' }
       }
-      let pathCode = normalizeXoomsharePathCode({
-        value: (body as XoomshareCreateBody | undefined)?.pathCode,
-        reservedPathCodes: RESERVED_PATH_CODES,
-      })
+      // The route segment is an authorization capability, not a human slug.
+      // Never accept caller-chosen values for newly created rooms.
+      let pathCode = generateXoomsharePathCode()
 
       for (let attempt = 0; attempt < 5; attempt++) {
         const existing = await db.select().from(pages).where(eq(pages.pathCode, pathCode)).limit(1)
         if (existing.length === 0) break
-        if ((body as XoomshareCreateBody | undefined)?.pathCode) {
-          set.status = 409
-          return { success: false, error: 'That secret page code is already in use' }
-        }
         pathCode = generateXoomsharePathCode()
       }
 
@@ -932,12 +887,7 @@ const app = new Elysia()
         },
       }
     } catch (e: unknown) {
-      console.error('Create Xoomshare room failed:', e)
-
-      if (e instanceof ResourceValidationError || e instanceof XoomsharePathCodeError) {
-        set.status = 400
-        return { success: false, error: e.message }
-      }
+      logOperationalFailure('Create Xoomshare room failed', e)
 
       set.status = 500
       return { success: false, error: 'Unable to create Xoomshare page' }
@@ -996,7 +946,7 @@ const app = new Elysia()
         })),
       }
     } catch (e) {
-      console.error('Fetch Xoomshare room failed:', e)
+      logOperationalFailure('Fetch Xoomshare room failed', e)
       set.status = 500
       return { success: false, error: 'Unable to load Xoomshare page' }
     }
@@ -1052,7 +1002,7 @@ const app = new Elysia()
       set.status = 201
       return { success: true, page: formatPage(created.page) }
     } catch (e) {
-      console.error('Create Xoomshare page failed:', e)
+      logOperationalFailure('Create Xoomshare page failed', e)
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
         return { success: false, error: e.message }
@@ -1112,7 +1062,7 @@ const app = new Elysia()
 
       return { success: true, page: formatPage(updated.page) }
     } catch (e) {
-      console.error('Rename Xoomshare page failed:', e)
+      logOperationalFailure('Rename Xoomshare page failed', e)
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
         return { success: false, error: e.message }
@@ -1212,11 +1162,10 @@ const app = new Elysia()
       }
 
       publishXoomshareUpdate(room[0]!.id, { type: 'page_deleted', pageId: params.id })
-      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
-      console.error('Delete Xoomshare page failed:', e)
+      logOperationalFailure('Delete Xoomshare page failed', e)
       set.status = 500
       return { success: false, error: 'Unable to delete page' }
     }
@@ -1260,7 +1209,7 @@ const app = new Elysia()
 
       return { success: true, allowGuestResources }
     } catch (e) {
-      console.error('Update Xoomshare settings failed:', e)
+      logOperationalFailure('Update Xoomshare settings failed', e)
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
         return { success: false, error: e.message }
@@ -1304,11 +1253,10 @@ const app = new Elysia()
       })
 
       publishXoomshareUpdate(destroyedRoomId, { type: 'room_destroyed' })
-      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
-      console.error('Destroy Xoomshare session failed:', e)
+      logOperationalFailure('Destroy Xoomshare session failed', e)
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
         return { success: false, error: e.message }
@@ -1501,7 +1449,7 @@ const app = new Elysia()
       }
     } catch (e: unknown) {
       await queueFailedUncommittedAssetCleanup(uploadedAsset)
-      console.error('Create Xoomshare resource failed:', e)
+      logOperationalFailure('Create Xoomshare resource failed', e)
 
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
@@ -1643,7 +1591,7 @@ const app = new Elysia()
         },
       }
     } catch (e: unknown) {
-      console.error('Update Xoomshare text resource failed:', e)
+      logOperationalFailure('Update Xoomshare text resource failed', e)
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
         return { success: false, error: e.message }
@@ -1715,7 +1663,7 @@ const app = new Elysia()
         },
       }
     } catch (e: unknown) {
-      console.error('Update Xoomshare resource position failed:', e)
+      logOperationalFailure('Update Xoomshare resource position failed', e)
 
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
@@ -1785,11 +1733,10 @@ const app = new Elysia()
       })
 
       publishXoomshareUpdate(deleted.roomId, { type: 'resource_updated' })
-      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
-      console.error('Delete Xoomshare resource failed:', e)
+      logOperationalFailure('Delete Xoomshare resource failed', e)
       if (e instanceof XoomshareMutationError) {
         set.status = e.status
         return { success: false, error: e.message }
@@ -1887,7 +1834,7 @@ const app = new Elysia()
 
       return { success: true, page: formatPage(newPage[0]!) }
     } catch (e) {
-      console.error(e)
+      logOperationalFailure('Create page failed', e)
       return { success: false, error: 'server error' }
     }
   })
@@ -1979,7 +1926,6 @@ const app = new Elysia()
         await tx.delete(pages).where(eq(pages.id, page.id))
         return true
       })
-      if (deleted) void drainAssetDeletionQueue()
 
       return { success: true }
     } catch {
@@ -2106,7 +2052,7 @@ const app = new Elysia()
       return { success: true, resource: formatResource(newResource[0]!) }
     } catch (e: unknown) {
       await queueFailedUncommittedAssetCleanup(uploadedAsset)
-      console.error('Create resource failed:', e)
+      logOperationalFailure('Create resource failed', e)
 
       if (e instanceof ResourceValidationError) {
         set.status = 400
@@ -2148,20 +2094,104 @@ const app = new Elysia()
     }
   })
   // ── GET /resources/:id — Fetch a single resource ──
-  .get('/resources/:id', async ({ params, set }) => {
+  .get('/resources/:id', async ({ params, request, jwt, cookie: { auth_token }, set }) => {
     try {
       if (!isUuid(params.id)) {
         set.status = 400
         return { success: false, error: 'Resource id is invalid.' }
       }
-      const [resource] = await db.select().from(resources).where(eq(resources.id, params.id)).limit(1)
-      if (!resource) return { success: false, error: 'not found' }
-      return { success: true, resource: formatResource(resource) }
+      let authenticatedUserId: string | null = null
+      const token = auth_token?.value as string | undefined
+      if (token) {
+        try {
+          const claims = await jwt.verify(token)
+          authenticatedUserId = claims && typeof claims.sub === 'string' ? claims.sub : null
+        } catch { /* anonymous access is evaluated below */ }
+      }
+      let xoomsharePathCode: string | null = null
+      const header = request.headers.get('x-saveswitch-xoomshare-path')
+      if (header !== null) {
+        try {
+          // Header is a room capability, never a client-provided UUID.
+          xoomsharePathCode = normalizeXoomsharePathCode({ value: header, reservedPathCodes: RESERVED_PATH_CODES })
+        } catch {
+          set.status = 404
+          return { success: false, error: 'not found' }
+        }
+      }
+      const [row] = await db.select({
+        resource: resources,
+        pageUserId: pages.userId,
+        pageVisibility: pages.visibility,
+        pageSessionId: pages.sessionId,
+        userVisibility: users.visibility,
+      }).from(resources)
+        .innerJoin(pages, eq(resources.pageId, pages.id))
+        .leftJoin(users, eq(pages.userId, users.id))
+        .where(eq(resources.id, params.id)).limit(1)
+      if (!row) {
+        set.status = 404
+        return { success: false, error: 'not found' }
+      }
+      let root: { pathCode: string | null; sessionId: string | null; expiresAt: Date | null; createdAt: Date } | undefined
+      if (row.pageSessionId) {
+        ;[root] = await db.select({ pathCode: pages.pathCode, sessionId: pages.sessionId, expiresAt: pages.expiresAt, createdAt: pages.createdAt })
+          .from(pages).where(and(eq(pages.sessionId, row.pageSessionId), isNotNull(pages.pathCode))).limit(1)
+      }
+      const allowed = canReadResource({
+        authenticatedUserId,
+        xoomsharePathCode,
+        resource: {
+          resourcePageId: row.resource.pageId,
+          pageUserId: row.pageUserId,
+          pageVisibility: row.pageVisibility,
+          userVisibility: row.userVisibility,
+          pageSessionId: row.pageSessionId,
+          rootSessionId: root?.sessionId ?? null,
+          rootPathCode: root?.pathCode ?? null,
+          rootExpired: root ? isExpired(getEffectiveXoomshareExpiresAt(root as typeof pages.$inferSelect)) : true,
+        },
+      })
+      if (!allowed) {
+        set.status = 404
+        return { success: false, error: 'not found' }
+      }
+      return { success: true, resource: formatResource(row.resource) }
 
     } catch (e) {
-      console.error(e)
+      logOperationalFailure('Fetch resource failed', e)
       return { success: false, error: 'server error' }
     }
+  })
+
+  // Owner-only browser navigation endpoint. Keeping this on the API host lets
+  // the browser send the API's host-only auth cookie without exposing it to the
+  // separately hosted frontend.
+  .get('/resources/:id/download', async ({ params, request, jwt, cookie: { auth_token } }) => {
+    const notFound = () => new Response('Resource not found', {
+      status: 404,
+      headers: { 'Cache-Control': 'private, no-store' },
+    })
+    if (!isUuid(params.id)) return notFound()
+
+    const token = auth_token?.value as string | undefined
+    if (!token) return notFound()
+    let authenticatedUserId: string | null = null
+    try {
+      const claims = await jwt.verify(token)
+      authenticatedUserId = claims && typeof claims.sub === 'string' ? claims.sub : null
+    } catch { /* generic denial below */ }
+    if (!authenticatedUserId) return notFound()
+
+    const [row] = await db.select({ resource: resources, pageUserId: pages.userId })
+      .from(resources)
+      .innerJoin(pages, eq(resources.pageId, pages.id))
+      .where(eq(resources.id, params.id))
+      .limit(1)
+    if (!row || row.pageUserId !== authenticatedUserId) return notFound()
+
+    const inline = new URL(request.url).searchParams.get('disposition') === 'inline'
+    return createDownloadResponse(row.resource, inline) ?? notFound()
   })
 
   // ── PATCH /resources/:id/position — Update resource coordinates ──
@@ -2221,7 +2251,7 @@ const app = new Elysia()
 
       return { success: true, resource: formatResource(updatedResource!) };
     } catch (e: unknown) {
-      console.error('Update resource position failed:', e)
+      logOperationalFailure('Update resource position failed', e)
 
       if (e instanceof ResourceValidationError) {
         set.status = 400
@@ -2301,7 +2331,7 @@ const app = new Elysia()
         resource: formatResource(updatedResource!),
       }
     } catch (e: unknown) {
-      console.error('Update resource content failed:', e)
+      logOperationalFailure('Update resource content failed', e)
       set.status = 500
       return { success: false, error: 'Unable to update this text right now.' }
     }
@@ -2348,11 +2378,10 @@ const app = new Elysia()
       if (app.server) {
         app.server.publish(`page_${resourceToDelete[0]!.pageId}`, JSON.stringify({ type: 'resource_updated' }))
       }
-      void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
-      console.error(e)
+      logOperationalFailure('Delete resource failed', e)
       return { success: false, error: 'server error' }
     }
   })
@@ -2361,13 +2390,17 @@ const app = new Elysia()
   // ══════════════════════════════════════════════
 
   // ── GET /public/users/:username — Get public profile and public pages ──
-  .get('/public/users/:username', async ({ params }) => {
+  .get('/public/users/:username', async ({ params, set }) => {
     try {
       const { username } = params
 
       // Find user
-      const userList = await db.select().from(users).where(eq(users.username, username)).limit(1)
+      const userList = await db.select().from(users).where(and(
+        eq(users.username, username),
+        eq(users.visibility, 'public'),
+      )).limit(1)
       if (userList.length === 0) {
+        set.status = 404
         return { success: false, error: 'User not found' }
       }
       const user = userList[0]!
@@ -2376,7 +2409,8 @@ const app = new Elysia()
       const userPages = await db.select().from(pages).where(
         and(
           eq(pages.userId, user.id),
-          eq(pages.visibility, 'public')
+          eq(pages.visibility, 'public'),
+          isNull(pages.sessionId),
         )
       )
 
@@ -2391,7 +2425,7 @@ const app = new Elysia()
         pages: userPages.map(formatPage),
       }
     } catch (e) {
-      console.error(e)
+      logOperationalFailure('Fetch public user failed', e)
       return { success: false, error: 'server error' }
     }
   })
@@ -2407,21 +2441,24 @@ const app = new Elysia()
 
 
       // Verify the page exists and is public
-      const pageList = await db.select().from(pages).where(eq(pages.id, pageId)).limit(1)
+      const pageList = await db.select({ page: pages }).from(pages)
+        .innerJoin(users, eq(pages.userId, users.id))
+        .where(and(
+          eq(pages.id, pageId),
+          eq(pages.visibility, 'public'),
+          eq(users.visibility, 'public'),
+          isNotNull(pages.userId),
+          isNull(pages.sessionId),
+        )).limit(1)
       if (pageList.length === 0) {
+        set.status = 404
         return { success: false, error: 'Page not found' }
-      }
-
-      const page = pageList[0]!
-
-      if (page.visibility !== 'public') {
-        return { success: false, error: 'Access denied' }
       }
 
       const pageResources = await db.select().from(resources).where(eq(resources.pageId, pageId))
       return { success: true, resources: pageResources.map(formatResource) }
     } catch (e) {
-      console.error(e)
+      logOperationalFailure('Fetch public page resources failed', e)
       return { success: false, error: 'server error' }
     }
   })
@@ -2438,3 +2475,7 @@ if (DEV_MODE) {
 console.log(
   `🚀 Saveswitch API running at http://${app.server?.hostname}:${app.server?.port}`
 )
+
+installGracefulShutdown({
+  close: () => { app.stop() },
+})

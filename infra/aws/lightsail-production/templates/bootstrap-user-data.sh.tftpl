@@ -1,0 +1,336 @@
+# AWS Lightsail prepends its own /bin/sh launcher before this payload. Keep this
+# entire template POSIX-sh compatible and do not depend on a shebang at byte 0.
+# This baseline contains no package installation, network fetch, application,
+# database, disk, swap, Cloudflare, Cloudinary, authentication, or secret work.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+SAVESWITCH_CONTRACT=/etc/saveswitch/bootstrap-contract
+SAVESWITCH_SSH_CONFIG=/etc/ssh/sshd_config.d/00-saveswitch-hardening.conf
+SAVESWITCH_APT_CONFIG=/etc/apt/apt.conf.d/20auto-upgrades
+SAVESWITCH_UFW_CIDRS=/etc/saveswitch/ufw-admin-cidrs
+
+saveswitch_fail() {
+  printf 'Saveswitch first-boot baseline failed: %s\n' "$*" >&2
+  exit 1
+}
+
+saveswitch_require_command() {
+  command -v "$1" >/dev/null 2>&1 || saveswitch_fail "required command is unavailable: $1"
+}
+
+saveswitch_install_file() {
+  saveswitch_source=$1
+  saveswitch_target=$2
+  saveswitch_mode=$3
+
+  if [ -L "$saveswitch_target" ]; then
+    saveswitch_fail "refusing symbolic-link target: $saveswitch_target"
+  fi
+  if [ -e "$saveswitch_target" ] && [ ! -f "$saveswitch_target" ]; then
+    saveswitch_fail "refusing non-regular target: $saveswitch_target"
+  fi
+
+  if [ -f "$saveswitch_target" ] && cmp -s "$saveswitch_source" "$saveswitch_target"; then
+    chown root:root "$saveswitch_target"
+    chmod "$saveswitch_mode" "$saveswitch_target"
+    return 0
+  fi
+
+  install -o root -g root -m "$saveswitch_mode" "$saveswitch_source" "$saveswitch_target"
+}
+
+saveswitch_valid_ipv4_32() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { valid = 0 }
+    /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/32$/ {
+      split($0, slash, "/")
+      split(slash[1], octet, ".")
+      valid = 1
+      for (i = 1; i <= 4; i++) {
+        if (octet[i] !~ /^[0-9]+$/ || octet[i] < 0 || octet[i] > 255) valid = 0
+      }
+      if (slash[1] == "0.0.0.0") valid = 0
+    }
+    END { exit valid ? 0 : 1 }
+  '
+}
+
+saveswitch_ufw_contract_valid() {
+  saveswitch_contract_file=$1
+  [ -f "$saveswitch_contract_file" ] && [ ! -L "$saveswitch_contract_file" ] || return 1
+  [ "$(stat -c '%U:%G:%a' "$saveswitch_contract_file" 2>/dev/null || true)" = 'root:root:600' ] || return 1
+  [ -s "$saveswitch_contract_file" ] || return 1
+  [ "$(cat "$saveswitch_contract_file")" = "$(sort -u "$saveswitch_contract_file")" ] || return 1
+  saveswitch_previous_cidr=
+  saveswitch_contract_rows=0
+  while IFS= read -r saveswitch_contract_cidr || [ -n "$saveswitch_contract_cidr" ]; do
+    saveswitch_valid_ipv4_32 "$saveswitch_contract_cidr" || return 1
+    [ "$saveswitch_contract_cidr" != "$saveswitch_previous_cidr" ] || return 1
+    saveswitch_previous_cidr=$saveswitch_contract_cidr
+    saveswitch_contract_rows=$((saveswitch_contract_rows + 1))
+  done <"$saveswitch_contract_file"
+  [ "$saveswitch_contract_rows" -gt 0 ]
+}
+
+[ "$(id -u)" -eq 0 ] || saveswitch_fail 'this baseline must run as root'
+
+for saveswitch_command in awk apt-config chown chmod cmp grep id install mktemp mv rm sort sshd stat systemctl ufw; do
+  saveswitch_require_command "$saveswitch_command"
+done
+saveswitch_require_command unattended-upgrade
+
+for saveswitch_directory in \
+  /etc/saveswitch \
+  /srv/saveswitch \
+  /srv/saveswitch/backups \
+  /srv/saveswitch/config \
+  /srv/saveswitch/releases \
+  /srv/saveswitch/restore-tests; do
+  [ ! -L "$saveswitch_directory" ] || saveswitch_fail "refusing symbolic-link directory: $saveswitch_directory"
+done
+
+# Invalidate any earlier marker before changing controls. A completion contract
+# is recreated atomically only after every required verification succeeds.
+if [ -e "$SAVESWITCH_CONTRACT" ] || [ -L "$SAVESWITCH_CONTRACT" ]; then
+  [ -f "$SAVESWITCH_CONTRACT" ] && [ ! -L "$SAVESWITCH_CONTRACT" ] ||
+    saveswitch_fail "refusing unexpected bootstrap-contract target"
+  rm -f "$SAVESWITCH_CONTRACT"
+fi
+
+install -d -o root -g root -m 0700 \
+  /etc/saveswitch \
+  /srv/saveswitch \
+  /srv/saveswitch/backups \
+  /srv/saveswitch/config \
+  /srv/saveswitch/releases \
+  /srv/saveswitch/restore-tests
+
+# cloud-final can run before the Ubuntu SSH unit has created its volatile
+# privilege-separation directory. Create and verify that runtime-only path so
+# `sshd -t` is meaningful without starting or restarting a service.
+[ ! -L /run/sshd ] || saveswitch_fail 'refusing symbolic-link SSH runtime directory'
+install -d -o root -g root -m 0755 /run/sshd
+[ "$(stat -c '%U:%G:%a' /run/sshd)" = 'root:root:755' ] ||
+  saveswitch_fail 'SSH runtime directory owner or mode is unsafe'
+
+saveswitch_ssh_candidate=$(mktemp /tmp/saveswitch-sshd.XXXXXX)
+saveswitch_ssh_backup=$(mktemp /tmp/saveswitch-sshd-backup.XXXXXX)
+saveswitch_ssh_had_previous=false
+cat >"$saveswitch_ssh_candidate" <<'SAVESWITCH_SSH_EOF'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+GatewayPorts no
+PermitTunnel no
+SAVESWITCH_SSH_EOF
+chmod 0600 "$saveswitch_ssh_candidate" "$saveswitch_ssh_backup"
+
+# Validate the drop-in in isolation first. Then validate the complete effective
+# server configuration, restoring the previous managed file if that check fails.
+sshd -t -f "$saveswitch_ssh_candidate" || saveswitch_fail 'SSH hardening candidate is invalid'
+if [ -e "$SAVESWITCH_SSH_CONFIG" ] || [ -L "$SAVESWITCH_SSH_CONFIG" ]; then
+  [ -f "$SAVESWITCH_SSH_CONFIG" ] && [ ! -L "$SAVESWITCH_SSH_CONFIG" ] ||
+    saveswitch_fail "refusing unexpected SSH hardening target"
+  install -o root -g root -m 0600 "$SAVESWITCH_SSH_CONFIG" "$saveswitch_ssh_backup"
+  saveswitch_ssh_had_previous=true
+fi
+saveswitch_install_file "$saveswitch_ssh_candidate" "$SAVESWITCH_SSH_CONFIG" 0644
+if ! sshd -t; then
+  if [ "$saveswitch_ssh_had_previous" = true ]; then
+    install -o root -g root -m 0644 "$saveswitch_ssh_backup" "$SAVESWITCH_SSH_CONFIG"
+  else
+    rm -f "$SAVESWITCH_SSH_CONFIG"
+  fi
+  sshd -t || saveswitch_fail 'SSH rollback did not restore a valid configuration'
+  saveswitch_fail 'complete SSH configuration rejected the hardening drop-in'
+fi
+rm -f "$saveswitch_ssh_candidate" "$saveswitch_ssh_backup"
+
+saveswitch_apt_candidate=$(mktemp /tmp/saveswitch-auto-upgrades.XXXXXX)
+cat >"$saveswitch_apt_candidate" <<'SAVESWITCH_APT_EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+SAVESWITCH_APT_EOF
+chmod 0600 "$saveswitch_apt_candidate"
+saveswitch_install_file "$saveswitch_apt_candidate" "$SAVESWITCH_APT_CONFIG" 0644
+rm -f "$saveswitch_apt_candidate"
+apt-config dump >/dev/null
+systemctl enable apt-daily.timer apt-daily-upgrade.timer >/dev/null
+systemctl is-enabled --quiet apt-daily.timer
+systemctl is-enabled --quiet apt-daily-upgrade.timer
+
+if [ -e "$SAVESWITCH_UFW_CIDRS" ] || [ -L "$SAVESWITCH_UFW_CIDRS" ]; then
+  [ -f "$SAVESWITCH_UFW_CIDRS" ] && [ ! -L "$SAVESWITCH_UFW_CIDRS" ] ||
+    saveswitch_fail 'refusing unexpected UFW CIDR contract target'
+fi
+ufw --version >/dev/null
+
+saveswitch_configure_ufw() {
+  ufw --force reset >/dev/null
+  ufw default deny incoming >/dev/null
+  ufw default allow outgoing >/dev/null
+  ufw allow in on lo >/dev/null
+  ufw allow out on lo >/dev/null
+%{ for cidr in admin_ipv4_cidrs ~}
+  ufw allow proto tcp from ${cidr} to any port 22 comment 'Saveswitch break-glass SSH' >/dev/null
+%{ endfor ~}
+  ufw --force enable >/dev/null
+}
+
+saveswitch_ufw_status_matches_contract() {
+  saveswitch_inspected_contract=$1
+  # UFW may render an IPv4 single-host rule as either A.B.C.D/32 or the
+  # canonical A.B.C.D. The persisted contract remains /32-only; this parser
+  # normalizes only the display form and compares complete UFW columns.
+  awk -v contract_file="$saveswitch_inspected_contract" '
+    BEGIN {
+      while ((getline cidr < contract_file) > 0) {
+        host = cidr
+        sub(/\/32$/, "", host)
+        allowed_host[host] = 1
+        expected_rules++
+      }
+      close(contract_file)
+      if (expected_rules == 0) exit 1
+    }
+    {
+      comment_field = NF + 1
+      for (field = 1; field <= NF; field++) {
+        if ($field == "#") {
+          comment_field = field
+          break
+        }
+      }
+      for (field = 1; field < comment_field; field++) {
+        if (($field != "ALLOW" && $field != "LIMIT") ||
+            ($(field + 1) != "IN" && $(field + 1) != "FWD")) continue
+        # A status row may contain only one active permission action before an
+        # optional comment. Any ALLOW/LIMIT inbound or forwarded permission is
+        # denied unless it is one exact reviewed rule below.
+        if ($field == "ALLOW" && $(field + 1) == "IN" &&
+          ((NF == 6 &&
+          $1 == "Anywhere" && $2 == "on" && $3 == "lo" &&
+          $4 == "ALLOW" && $5 == "IN" && $6 == "Anywhere") ||
+          (NF == 8 &&
+          $1 == "Anywhere" && $2 == "(v6)" && $3 == "on" && $4 == "lo" &&
+          $5 == "ALLOW" && $6 == "IN" && $7 == "Anywhere" && $8 == "(v6)"))) break
+        # The reviewed command creates this exact UFW status shape:
+        # 22/tcp ALLOW IN A.B.C.D[(/32)]. Do not accept partial host matches,
+        # a different port/protocol, a LIMIT/FWD action, or extra rules.
+        if ($field != "ALLOW" || $(field + 1) != "IN" || field != 2 ||
+            !(comment_field == 5 || (comment_field == NF + 1 && NF == 4)) ||
+            $1 != "22/tcp" || !( $4 in allowed_host ) &&
+            !( $4 ~ /\/32$/ && substr($4, 1, length($4) - 3) in allowed_host )) {
+          invalid = 1
+          next
+        }
+        host = $4
+        sub(/\/32$/, "", host)
+        seen_rules[host]++
+        break
+      }
+    }
+    END {
+      if (invalid) exit 1
+      for (host in allowed_host) {
+        if (seen_rules[host] != 1) exit 1
+      }
+    }
+  '
+}
+
+saveswitch_ufw_recover() {
+  saveswitch_recovery_status=$1
+  trap - 0 1 2 15
+  if [ "$SAVESWITCH_UFW_RECOVERY_ACTIVE" = true ]; then
+    saveswitch_configure_ufw >/dev/null 2>&1 || :
+  fi
+  if [ -n "$saveswitch_ufw_candidate" ]; then
+    rm -f "$saveswitch_ufw_candidate"
+  fi
+  exit "$saveswitch_recovery_status"
+}
+
+# Reset is intentional for a new instance. From the first reset until exact
+# verification, any error or signal reconstructs and enables the minimal
+# default-deny ruleset so an interrupted bootstrap cannot leave UFW disabled.
+SAVESWITCH_UFW_RECOVERY_ACTIVE=false
+saveswitch_ufw_candidate=
+trap 'saveswitch_ufw_recover $?' 0
+trap 'saveswitch_ufw_recover 129' 1
+trap 'saveswitch_ufw_recover 130' 2
+trap 'saveswitch_ufw_recover 143' 15
+saveswitch_ufw_candidate=$(mktemp /etc/saveswitch/.ufw-admin-cidrs.XXXXXX)
+cat >"$saveswitch_ufw_candidate" <<'SAVESWITCH_UFW_EOF'
+%{ for cidr in admin_ipv4_cidrs ~}
+${cidr}
+%{ endfor ~}
+SAVESWITCH_UFW_EOF
+sort -u "$saveswitch_ufw_candidate" -o "$saveswitch_ufw_candidate"
+chown root:root "$saveswitch_ufw_candidate"
+chmod 0600 "$saveswitch_ufw_candidate"
+saveswitch_ufw_contract_valid "$saveswitch_ufw_candidate" ||
+  saveswitch_fail 'rendered UFW CIDR contract is invalid'
+SAVESWITCH_UFW_RECOVERY_ACTIVE=true
+saveswitch_configure_ufw
+saveswitch_ufw_status=$(ufw status verbose)
+printf '%s\n' "$saveswitch_ufw_status" | grep -Fqx 'Status: active' || saveswitch_fail 'UFW did not become active'
+printf '%s\n' "$saveswitch_ufw_status" | grep -Eq '^Default:[[:space:]]+deny \(incoming\), allow \(outgoing\)' ||
+  saveswitch_fail 'UFW defaults differ from the reviewed contract'
+printf '%s\n' "$saveswitch_ufw_status" | saveswitch_ufw_status_matches_contract "$saveswitch_ufw_candidate" ||
+  saveswitch_fail 'UFW exact-state verification failed'
+mv -f "$saveswitch_ufw_candidate" "$SAVESWITCH_UFW_CIDRS"
+saveswitch_ufw_candidate=
+[ "$(stat -c '%U:%G:%a' "$SAVESWITCH_UFW_CIDRS")" = 'root:root:600' ] ||
+  saveswitch_fail 'UFW CIDR contract metadata is invalid'
+saveswitch_ufw_contract_valid "$SAVESWITCH_UFW_CIDRS" ||
+  saveswitch_fail 'persisted UFW CIDR contract is invalid'
+SAVESWITCH_UFW_RECOVERY_ACTIVE=false
+trap - 0 1 2 15
+
+for saveswitch_setting in \
+  'permitrootlogin no' \
+  'passwordauthentication no' \
+  'kbdinteractiveauthentication no' \
+  'pubkeyauthentication yes' \
+  'x11forwarding no' \
+  'allowtcpforwarding no' \
+  'allowagentforwarding no' \
+  'gatewayports no' \
+  'permittunnel no'; do
+  sshd -T | grep -Fqx "$saveswitch_setting" ||
+    saveswitch_fail "effective SSH setting is missing: $saveswitch_setting"
+done
+
+# Ubuntu 24.04 may expose OpenSSH through ssh.socket without an active
+# ssh.service. Reload only the real service when it is active; socket-activated
+# future connections already consume the validated configuration. Never assume
+# that a separate sshd.service exists.
+if systemctl is-active --quiet ssh.service; then
+  systemctl reload ssh.service
+elif systemctl is-active --quiet ssh.socket; then
+  :
+else
+  saveswitch_fail 'neither ssh.service nor ssh.socket is active'
+fi
+
+saveswitch_contract_candidate=$(mktemp /etc/saveswitch/.bootstrap-contract.XXXXXX)
+cat >"$saveswitch_contract_candidate" <<'SAVESWITCH_CONTRACT_EOF'
+lightsail-shell-baseline-complete
+runtime-deployment-pending
+swap-unconfigured
+database-disk-unformatted
+cloudflare-tunnel-unconfigured
+SAVESWITCH_CONTRACT_EOF
+chown root:root "$saveswitch_contract_candidate"
+chmod 0600 "$saveswitch_contract_candidate"
+mv -f "$saveswitch_contract_candidate" "$SAVESWITCH_CONTRACT"

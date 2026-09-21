@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Saveswitch PostgreSQL backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=saveswitch-backup.service
+
+[Install]
+WantedBy=timers.target

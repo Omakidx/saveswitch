@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { generateXoomsharePathCode, normalizeXoomsharePathCode, XoomsharePathCodeError } from './xoomshare-auth'
-import { canReserveXoomshareQuota, FixedWindowRateLimiter, getXoomshareResourceStorageBytes, isWithinUtf8ByteLimit, isXoomsharePageId, SocketQueryBudget, truncateUtf8, utf8ByteLength, XOOMSHARE_MAX_PAGE_NAME_BYTES, XOOMSHARE_MAX_RESOURCE_BYTES, XOOMSHARE_MAX_RESOURCES, XOOMSHARE_MAX_TITLE_BYTES } from './xoomshare-security'
+import { canReserveXoomshareQuota, FixedWindowRateLimiter, getXoomshareResourceStorageBytes, isWithinUtf8ByteLimit, isXoomsharePageId, parseXoomshareSocketMessage, SocketQueryBudget, truncateUtf8, utf8ByteLength, XOOMSHARE_MAX_PAGE_NAME_BYTES, XOOMSHARE_MAX_RESOURCE_BYTES, XOOMSHARE_MAX_RESOURCES, XOOMSHARE_MAX_TITLE_BYTES, XOOMSHARE_WEBSOCKET_MAX_PAYLOAD_BYTES } from './xoomshare-security'
 import { getResourceDataUrlByteLength } from './utils/cloudinary'
 
 describe('Xoomshare release security controls', () => {
@@ -18,7 +18,7 @@ describe('Xoomshare release security controls', () => {
     expect(generateXoomsharePathCode()).not.toBe(generated)
   })
 
-  test('custom codes are constrained to safe, non-reserved 12–48 character values', () => {
+  test('legacy codes are constrained when resolving existing rooms', () => {
     const reserved = new Set(['reserved-room'])
     expect(normalizeXoomsharePathCode({ value: 'team-reference_2026', reservedPathCodes: reserved })).toBe('team-reference_2026')
     expect(() => normalizeXoomsharePathCode({ value: 'short', reservedPathCodes: reserved })).toThrow(XoomsharePathCodeError)
@@ -66,5 +66,13 @@ describe('Xoomshare release security controls', () => {
     expect(budget.consume(socket, 2, 1_000, 1)).toBe(true)
     expect(budget.consume(socket, 2, 1_000, 2)).toBe(false)
     expect(budget.consume(socket, 2, 1_000, 1_000)).toBe(true)
+  })
+
+  test('accepts the small text WebSocket contract and rejects oversized or binary messages', () => {
+    expect(parseXoomshareSocketMessage(JSON.stringify({ type: 'ping' }))).toEqual({ type: 'ping' })
+    expect(parseXoomshareSocketMessage(JSON.stringify({ type: 'subscribe', pageId: '11111111-1111-4111-8111-111111111111' }))).toMatchObject({ type: 'subscribe' })
+    expect(parseXoomshareSocketMessage('{bad json')).toBeNull()
+    expect(parseXoomshareSocketMessage(new Uint8Array([1, 2, 3]))).toBeNull()
+    expect(parseXoomshareSocketMessage('x'.repeat(XOOMSHARE_WEBSOCKET_MAX_PAYLOAD_BYTES + 1))).toBeNull()
   })
 })
