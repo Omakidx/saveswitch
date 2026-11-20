@@ -1,6 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  async redirects() {
+    // Server-level redirect so `/` answers 307 immediately (the page-level
+    // redirect() streams a meta refresh under vinext).
+    return [{ source: "/", destination: "/login", permanent: false }];
+  },
   async headers() {
     return [
       {

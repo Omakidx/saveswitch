@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Production web app on Cloudflare Workers, built with vinext. Deploy from client/:
+  //   NEXT_PUBLIC_API_BASE=https://api.saveswitch.xyz bun run build:vinext
+  //   npx wrangler deploy --config dist/server/wrangler.json
+  // NEXT_PUBLIC_* values are inlined at build time, so they must be set when building.
+  "name": "saveswitch-production-web",
+  "compatibility_date": "2026-11-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "vinext/server/fetch-handler",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "saveswitch.xyz", "custom_domain": true },
+    { "pattern": "www.saveswitch.xyz", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "dist/client",
+    "html_handling": "none",
+    "not_found_handling": "none",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/*",
+      "!/_next/static/*",
+      "!/*/_next/static/*"
+    ]
+  }
+}
