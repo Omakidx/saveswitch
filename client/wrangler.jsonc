@@ -9,6 +9,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "vinext/server/fetch-handler",
   "workers_dev": true,
+  "preview_urls": false,
   "routes": [
     { "pattern": "saveswitch.xyz", "custom_domain": true },
     { "pattern": "www.saveswitch.xyz", "custom_domain": true }
