@@ -11,6 +11,8 @@ import LoadingSpinner from "@/components/LoadingSpinner";
 import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
 import { API_BASE } from "@/lib/api";
+import { safeGetItem, safeSetItem } from "@/lib/safeStorage";
+import { filterResourcesByCategory, parseCategory } from "@/lib/resourceFilters";
 
 interface PublicProfileClientProps {
   username: string;
@@ -47,19 +49,9 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
   const [resourcesPageId, setResourcesPageId] = useState<string | null>(null);
-  const [isCanvasMode, setIsCanvasMode] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem(`saveswitch-public-canvas-${username}`) === 'true';
-    }
-    return false;
-  });
-  const [activeCategory, setActiveCategory] = useState<Category>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(`saveswitch-public-category-${username}`);
-      return (saved as Category) || 'target';
-    }
-    return 'target';
-  });
+  const [isCanvasMode, setIsCanvasMode] = useState(() => safeGetItem(`saveswitch-public-canvas-${username}`) === 'true');
+  const [activeCategory, setActiveCategory] = useState<Category>(() =>
+    parseCategory(safeGetItem(`saveswitch-public-category-${username}`)));
   const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -68,11 +60,15 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
 
   // 1. Fetch user & public pages
   useEffect(() => {
+    const controller = new AbortController();
+
     async function fetchProfile() {
       try {
-        const res = await fetch(`${API_BASE}/public/users/${username}`);
-        if (!res.ok) throw new Error("User not found");
+        const res = await fetch(`${API_BASE}/public/users/${encodeURIComponent(username)}`, { signal: controller.signal });
+        if (res.status === 404) throw new Error("User not found");
+        if (!res.ok) throw new Error("We couldn't load this profile right now. Please try again later.");
         const data = await res.json() as PublicProfileResponse;
+        if (controller.signal.aborted) return;
         if (!data.success) throw new Error(data.error || "User not found");
 
         setUser(data.user);
@@ -87,19 +83,21 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
         setPages(formattedPages);
 
         if (formattedPages.length > 0) {
-          const savedPageId = localStorage.getItem(`saveswitch-public-page-${username}`);
+          const savedPageId = safeGetItem(`saveswitch-public-page-${username}`);
           const pageToSet = formattedPages.some((p) => p.id === savedPageId)
             ? savedPageId
             : formattedPages[formattedPages.length - 1].id;
           setActivePageId(pageToSet);
         }
       } catch (err: unknown) {
+        if (controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : "User not found");
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
-    fetchProfile();
+    void fetchProfile();
+    return () => controller.abort();
   }, [username]);
 
   // 2. Fetch resources when active page changes
@@ -108,39 +106,71 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
       return;
     }
 
+    const pageId = activePageId;
+    let cancelled = false;
+    let requestId = 0;
+    let socket: WebSocket | null = null;
+    let retryTimer: number | undefined;
+    let reconnectAttempt = 0;
+    const controller = new AbortController();
+
     async function fetchResources() {
+      // Responses can finish out of order after a page switch or a burst of socket events; only the
+      // newest request for the current page may update the canvas.
+      const currentRequest = ++requestId;
       try {
-        const res = await fetch(`${API_BASE}/public/pages/${activePageId}/resources`);
-        if (res.ok) {
-          const data = await res.json();
-          setResourcesPageId(activePageId);
-          setResources(data.resources || []);
-        }
+        const res = await fetch(`${API_BASE}/public/pages/${encodeURIComponent(pageId)}/resources`, { signal: controller.signal });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || currentRequest !== requestId) return;
+        setResourcesPageId(pageId);
+        setResources(data.resources || []);
       } catch (e) {
+        if (cancelled) return;
         console.error("Failed to fetch resources", e);
       }
     }
-    fetchResources();
+    void fetchResources();
 
-    // Setup WebSocket for real-time updates
-    const wsUrl = `${API_BASE.replace(/^http/, 'ws')}/ws`;
-    const ws = new WebSocket(wsUrl);
+    // Real-time updates, reconnecting with backoff so a dropped socket does not freeze the view.
+    const connect = () => {
+      if (cancelled) return;
+      const ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/ws`);
+      socket = ws;
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'subscribe', pageId: activePageId }));
-    };
+      ws.onopen = () => {
+        const isReconnect = reconnectAttempt > 0;
+        reconnectAttempt = 0;
+        ws.send(JSON.stringify({ type: 'subscribe', pageId }));
+        // Changes made while disconnected were never delivered.
+        if (isReconnect) void fetchResources();
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'resource_updated') {
-          fetchResources();
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'resource_updated') {
+            void fetchResources();
+          }
+        } catch {
+          // Ignore malformed non-resource messages.
         }
-      } catch {}
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        const waitMs = Math.min(1000 * 2 ** reconnectAttempt, 12000);
+        reconnectAttempt += 1;
+        retryTimer = window.setTimeout(connect, waitMs);
+      };
     };
+    connect();
 
     return () => {
-      ws.close();
+      cancelled = true;
+      controller.abort();
+      if (retryTimer) window.clearTimeout(retryTimer);
+      socket?.close();
     };
   }, [activePageId]);
 
@@ -220,29 +250,36 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   // Sync state to localStorage
   useEffect(() => {
     if (activePageId) {
-      localStorage.setItem(`saveswitch-public-page-${username}`, activePageId);
+      safeSetItem(`saveswitch-public-page-${username}`, activePageId);
     }
   }, [activePageId, username]);
 
   useEffect(() => {
-    localStorage.setItem(`saveswitch-public-canvas-${username}`, isCanvasMode.toString());
+    safeSetItem(`saveswitch-public-canvas-${username}`, isCanvasMode.toString());
   }, [isCanvasMode, username]);
 
   useEffect(() => {
-    localStorage.setItem(`saveswitch-public-category-${username}`, activeCategory);
+    safeSetItem(`saveswitch-public-category-${username}`, activeCategory);
   }, [activeCategory, username]);
+
+  const panTimerRef = useRef<number | null>(null);
+  const highlightTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (panTimerRef.current) window.clearTimeout(panTimerRef.current);
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+  }, []);
 
   const handlePanToResource = useCallback((id: string, x: number, y: number) => {
     setIsCanvasMode(true);
     setHighlightedResourceId(id);
-    
-    setTimeout(() => {
-      if (canvasRef.current) {
-        canvasRef.current.panTo(x, y);
-      }
+
+    if (panTimerRef.current) window.clearTimeout(panTimerRef.current);
+    panTimerRef.current = window.setTimeout(() => {
+      canvasRef.current?.panTo(x, y);
     }, 100);
 
-    setTimeout(() => {
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => {
       setHighlightedResourceId(null);
     }, 3000);
   }, []);
@@ -261,9 +298,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
 
   const activePage = pages.find(p => p.id === activePageId);
   const visibleResources = resourcesPageId === activePageId ? resources : [];
-  const filteredResources = activeCategory === 'target'
-    ? visibleResources
-    : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'link' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : true);
+  const filteredResources = filterResourcesByCategory(visibleResources, activeCategory);
 
   return (
     <div className="flex h-dvh w-full overflow-hidden text-[#F8F8F8]">

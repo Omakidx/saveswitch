@@ -34,6 +34,7 @@ interface FigmaDashboardChromeProps {
   onFileUploads: (files: File[]) => void | Promise<void>;
   onPaste: () => void | Promise<void>;
   isResourceIngesting?: boolean;
+  isLoadingPages?: boolean;
   ingestionProgress?: { completed: number; total: number } | null;
   onOpenProfile: () => void;
   onLogout: () => void;
@@ -163,6 +164,7 @@ export default function FigmaDashboardChrome({
   onFileUploads,
   onPaste,
   isResourceIngesting = false,
+  isLoadingPages = false,
   ingestionProgress = null,
   onOpenProfile,
   onLogout,
@@ -493,7 +495,7 @@ export default function FigmaDashboardChrome({
                 className={`${styles.pageColor} ${page.id === activePageId ? styles.pageColorActive : ""}`}
                 style={{ backgroundColor: page.color }}
                 onClick={page.id === "__starter__" ? handleCreatePage : () => onPageSelect(page.id)}
-                disabled={page.id === "__starter__" && isAddingPage}
+                disabled={page.id === "__starter__" && (isAddingPage || isLoadingPages)}
                 aria-label={page.id === "__starter__" && isAddingPage ? "Creating your first page" : `Open ${page.name}`}
                 aria-pressed={page.id === activePageId}
                 aria-busy={page.id === "__starter__" ? isAddingPage : undefined}

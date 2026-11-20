@@ -1,4 +1,5 @@
 import XoomshareRoomClient from "@/components/xoomshare/XoomshareRoomClient";
+import { safeDecodeURIComponent } from "@/lib/roomCode";
 
 export default async function XoomshareRoomPage({
   params,
@@ -6,5 +7,6 @@ export default async function XoomshareRoomPage({
   params: Promise<{ pathCode: string }>;
 }) {
   const resolvedParams = await params;
-  return <XoomshareRoomClient pathCode={decodeURIComponent(resolvedParams.pathCode)} />;
+  const pathCode = safeDecodeURIComponent(resolvedParams.pathCode);
+  return <XoomshareRoomClient key={pathCode} pathCode={pathCode} />;
 }

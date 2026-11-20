@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
+import { extractRoomCode } from "@/lib/roomCode";
 import styles from "../XoomshareEntry.module.css";
 
 export default function JoinXoomsharePage() {
@@ -12,7 +13,7 @@ export default function JoinXoomsharePage() {
 
   const handleJoin = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const trimmedCode = pathCode.trim();
+    const trimmedCode = extractRoomCode(pathCode);
     if (!trimmedCode) {
       setError("Enter a secret page code");
       return;

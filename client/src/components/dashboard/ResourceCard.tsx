@@ -126,6 +126,8 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
   const cardRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const codeHighlightRef = useRef<HTMLPreElement>(null);
+  const discardTextEditRef = useRef(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showHighlight, setShowHighlight] = useState(
     () => Date.now() - new Date(resource.created_at).getTime() < 5000
   );
@@ -135,6 +137,10 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
   const safeLinkHostname = resource.type === "link" && safeResourceUrl
     ? new URL(safeResourceUrl).hostname
     : "Unavailable link";
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (showHighlight) {
@@ -220,6 +226,12 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
   };
 
   const saveTextContent = async () => {
+    // Escape cancels the edit and then blurs the field; that blur must not save the stale draft
+    // this handler closed over.
+    if (discardTextEditRef.current) {
+      discardTextEditRef.current = false;
+      return;
+    }
     if (!canEditText || !onUpdateText) return;
 
     if (draftContent === resource.content) {
@@ -251,17 +263,24 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
       event.currentTarget.blur();
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      discardTextEditRef.current = true;
       setTextDraft(null);
       setTextEditError(null);
       event.currentTarget.blur();
+      discardTextEditRef.current = false;
     }
+  };
+
+  const flashCopied = () => {
+    setCopied(true);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopied(false), 2000);
   };
 
   const handleCopy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      flashCopied();
     } catch (e) {
       console.error(e);
     }
@@ -321,8 +340,7 @@ export default function ResourceCard({ resource, onDelete, onUpdateText, readOnl
           [blob.type]: blob
         })
       ]);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      flashCopied();
     } catch (err) {
       console.error("Failed to copy image to clipboard", err);
       // Fallback to text

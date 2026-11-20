@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { API_BASE } from '@/lib/api';
+import { attachmentContentDisposition } from '@/lib/contentDisposition';
 
 type DownloadResource = {
   type?: unknown;
@@ -7,6 +8,7 @@ type DownloadResource = {
   title?: unknown;
 };
 
+const ALLOWED_REDIRECT_HOST = 'res.cloudinary.com';
 const DATA_URL_PATTERN = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/i;
 const SAFE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
@@ -52,7 +54,7 @@ function attachmentResponse(resource: DownloadResource) {
     return new NextResponse(bytes, {
       headers: {
         'Cache-Control': 'private, no-store',
-        'Content-Disposition': `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        'Content-Disposition': attachmentContentDisposition(filename),
         'Content-Length': String(bytes.byteLength),
         'Content-Type': mimeType,
         'X-Content-Type-Options': 'nosniff',
@@ -62,8 +64,9 @@ function attachmentResponse(resource: DownloadResource) {
 
   try {
     const url = new URL(resource.content);
-    if (url.protocol !== 'https:') {
-      return new NextResponse('Resource is not downloadable', { status: 400 });
+    // Only Cloudinary-hosted assets are legitimate redirect targets; anything else could be an open redirect.
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== ALLOWED_REDIRECT_HOST) {
+      return new NextResponse('Resource not found', { status: 404 });
     }
     return NextResponse.redirect(url);
   } catch {
@@ -84,7 +87,8 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     }
 
     const data = await res.json();
-    if (!data.success || !data.resource) {
+    // Only {type, content, title} are read; the API may return a reduced body.
+    if (!data?.resource) {
       return new NextResponse('Resource not found', { status: 404 });
     }
 

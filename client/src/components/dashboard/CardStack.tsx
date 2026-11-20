@@ -5,8 +5,9 @@ import ResourceCard, { Resource } from "./ResourceCard";
 import styles from "./CardStack.module.css";
 import { moveResource } from "./resourceSelection";
 
-import React, { useState, useRef, useEffect } from "react";
-import { motion } from 'framer-motion';
+import React, { useContext, useState, useRef, useEffect } from "react";
+import { motion, MotionConfig } from 'framer-motion';
+import { CanvasZoomContext } from "./InfiniteCanvas";
 import { PageData } from "./ResourceMiniPanel";
 
 interface CardStackProps {
@@ -33,6 +34,7 @@ const CARD_SHADOWS = [
 ];
 
 export default function CardStack({ pages, activePageId, isExpanded = false, onPageSelect, resources = [], onDeleteResource, onUpdateResourcePosition, onUpdateTextResource, canManageResource, onResourceDragStateChange, highlightedResourceId, readOnly = false }: CardStackProps) {
+  const canvasZoom = useContext(CanvasZoomContext);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const startPos = useRef({ x: 0, y: 0 });
@@ -43,6 +45,10 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
     if (typeof window === "undefined") return { w: 1920, h: 1080 };
     return { w: window.innerWidth, h: window.innerHeight };
   });
+
+  useEffect(() => () => {
+    if (dragTimeout.current) clearTimeout(dragTimeout.current);
+  }, []);
 
   useEffect(() => {
     const updateSize = () => setWinSize({ w: window.innerWidth, h: window.innerHeight });
@@ -179,6 +185,11 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
   }
 
   return (
+    <MotionConfig
+      // Pointer movement is measured in screen pixels but the canvas scales its content, so divide
+      // by the zoom to keep a dragged card under the pointer when zoomed in or out.
+      transformPagePoint={(point) => ({ x: point.x / canvasZoom, y: point.y / canvasZoom })}
+    >
     <div
       className="relative flex items-center justify-center transition-all duration-500 ease-out"
       style={{ width: stackWidth, height: stackHeight, maxWidth: "100%" }}
@@ -323,5 +334,6 @@ export default function CardStack({ pages, activePageId, isExpanded = false, onP
         })}
       </div>
     </div>
+    </MotionConfig>
   );
 }

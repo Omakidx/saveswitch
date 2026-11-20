@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
+import React, { createContext, useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
 import {
   CANVAS_ZOOM_STEP,
   getCanvasZoomShortcut,
@@ -30,6 +30,9 @@ interface InfiniteCanvasProps {
   onNavigatePage?: (direction: CanvasPageNavigationDirection) => void;
   isResourceDragging?: boolean;
 }
+
+/** Current canvas zoom, so draggable children can compensate for the scaled coordinate space. */
+export const CanvasZoomContext = createContext(1);
 
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3;
@@ -253,48 +256,69 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
     setIsDragging(false);
   };
 
-  const handleWheel = (e: React.WheelEvent) => {
-    if (!isActive || isCanvasEditableTarget(e.target)) return;
-    e.preventDefault();
-    if (isResourceDragging) return;
-    if (e.ctrlKey || e.metaKey) {
-      wheelGestureRef.current = { x: 0, y: 0, startedAt: 0 };
-      // Zoom
-      const delta = e.deltaY * -0.002;
-      updateView(offsetRef.current, clampZoom(zoomRef.current + delta));
-    } else {
-      const now = performance.now();
-      const gesture = wheelGestureRef.current;
-      if (now - gesture.startedAt > HORIZONTAL_SWIPE_WINDOW_MS) {
-        gesture.x = 0;
-        gesture.y = 0;
-        gesture.startedAt = now;
-      }
-      gesture.x += e.deltaX;
-      gesture.y += e.deltaY;
+  // React registers wheel listeners as passive, so preventDefault() inside onWheel is ignored and
+  // ctrl+wheel / pinch would zoom the whole browser page. Use a native non-passive listener and
+  // read the latest props through a ref.
+  const wheelPropsRef = useRef({ isActive, isResourceDragging, onNavigatePage });
+  useEffect(() => {
+    wheelPropsRef.current = { isActive, isResourceDragging, onNavigatePage };
+  }, [isActive, isResourceDragging, onNavigatePage]);
 
-      const navigationDirection = getHorizontalSwipeNavigation(
-        gesture.x,
-        gesture.y,
-        now - gesture.startedAt,
-      );
-      if (navigationDirection && onNavigatePage && now >= wheelNavigationCooldownRef.current) {
-        wheelNavigationCooldownRef.current = now + HORIZONTAL_SWIPE_COOLDOWN_MS;
-        gesture.x = 0;
-        gesture.y = 0;
-        gesture.startedAt = now;
-        onNavigatePage(navigationDirection);
-        return;
-      }
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
 
-      // Pan
-      const newOffset = {
-        x: offsetRef.current.x - e.deltaX,
-        y: offsetRef.current.y - e.deltaY,
-      };
-      updateView(newOffset);
-    }
-  };
+    const handleWheel = (e: WheelEvent) => {
+      const { isActive: active, isResourceDragging: resourceDragging, onNavigatePage: navigatePage } = wheelPropsRef.current;
+      if (!active || isCanvasEditableTarget(e.target)) return;
+      if (e.target instanceof Element && e.target.closest("[data-canvas-ignore-wheel]")) return;
+      e.preventDefault();
+      if (resourceDragging) return;
+      if (e.ctrlKey || e.metaKey) {
+        wheelGestureRef.current = { x: 0, y: 0, startedAt: 0 };
+        // Zoom
+        const delta = e.deltaY * -0.002;
+        updateView(offsetRef.current, clampZoom(zoomRef.current + delta));
+      } else {
+        const now = performance.now();
+        const gesture = wheelGestureRef.current;
+        if (now - gesture.startedAt > HORIZONTAL_SWIPE_WINDOW_MS) {
+          gesture.x = 0;
+          gesture.y = 0;
+          gesture.startedAt = now;
+        }
+        gesture.x += e.deltaX;
+        gesture.y += e.deltaY;
+
+        const navigationDirection = getHorizontalSwipeNavigation(
+          gesture.x,
+          gesture.y,
+          now - gesture.startedAt,
+        );
+        if (navigationDirection && navigatePage && now >= wheelNavigationCooldownRef.current) {
+          wheelNavigationCooldownRef.current = now + HORIZONTAL_SWIPE_COOLDOWN_MS;
+          gesture.x = 0;
+          gesture.y = 0;
+          gesture.startedAt = now;
+          navigatePage(navigationDirection);
+          return;
+        }
+
+        // Pan
+        updateView({
+          x: offsetRef.current.x - e.deltaX,
+          y: offsetRef.current.y - e.deltaY,
+        });
+      }
+    };
+
+    container.addEventListener("wheel", handleWheel, { passive: false });
+    return () => container.removeEventListener("wheel", handleWheel);
+  }, [updateView]);
+
+  useEffect(() => () => {
+    if (animationTimeout.current) clearTimeout(animationTimeout.current);
+  }, []);
 
   return (
     <div
@@ -314,7 +338,6 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
-      onWheel={handleWheel}
     >
       <div
         className="w-full h-full flex items-center justify-center"
@@ -331,7 +354,9 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
             height: "100%"
           }}
         >
-          {children}
+          <CanvasZoomContext.Provider value={isActive ? zoom : 1}>
+            {children}
+          </CanvasZoomContext.Provider>
         </div>
       </div>
 
@@ -339,8 +364,8 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
       {isActive && (
         <div
           className="absolute bottom-5 right-5 z-50 flex h-9 items-center gap-0.5 rounded-full border border-white/55 bg-white/[0.28] px-1.5 text-[#2b2b28] shadow-[0_6px_18px_rgba(68,63,42,0.11)] backdrop-blur-2xl"
+          data-canvas-ignore-wheel
           onPointerDown={(e) => e.stopPropagation()}
-          onWheel={(e) => e.stopPropagation()}
         >
           <button
             type="button"

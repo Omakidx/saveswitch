@@ -9,6 +9,7 @@ import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/Infini
 import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
 import { API_BASE } from "@/lib/api";
+import { safeGetItem, safeSetItem } from "@/lib/safeStorage";
 import styles from "./XoomshareRoomClient.module.css";
 
 interface XoomshareRoom {
@@ -68,10 +69,21 @@ function isAbortError(error: unknown) {
   );
 }
 
+/** Reads a Blob/File as a data URL, resolving null (never "null" content) when reading fails. */
+function readAsDataUrl(file: Blob): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => resolve(null);
+    reader.onabort = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
 function getInitialState(pathCode: string) {
   if (typeof window === "undefined") return {};
   try {
-    const raw = localStorage.getItem(`xoomshare-state-${pathCode}`);
+    const raw = safeGetItem(`xoomshare-state-${pathCode}`);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed.expandedDates && Array.isArray(parsed.expandedDates)) {
@@ -115,20 +127,18 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const [pageNameDraft, setPageNameDraft] = useState("");
   const [hasDismissedExpiryNotice, setHasDismissedExpiryNotice] = useState(() => {
     if (typeof window === "undefined") return false;
-    return localStorage.getItem(`xoomshare-expiry-notice-${pathCode}`) === "dismissed";
+    return safeGetItem(`xoomshare-expiry-notice-${pathCode}`) === "dismissed";
   });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    try {
-      localStorage.setItem(`xoomshare-state-${pathCode}`, JSON.stringify({
-        isCanvasMode,
-        activeCategory,
-        selectedDate,
-        expandedDates: Array.from(expandedDates),
-        activePageId,
-      }));
-    } catch {}
+    safeSetItem(`xoomshare-state-${pathCode}`, JSON.stringify({
+      isCanvasMode,
+      activeCategory,
+      selectedDate,
+      expandedDates: Array.from(expandedDates),
+      activePageId,
+    }));
   }, [pathCode, isCanvasMode, activeCategory, selectedDate, expandedDates, activePageId]);
 
   useEffect(() => {
@@ -147,6 +157,19 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
 
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
   const canvasRef = useRef<InfiniteCanvasRef>(null);
+  const toastTimersRef = useRef<Set<number>>(new Set());
+  const highlightTimerRef = useRef<number | null>(null);
+  const placementReservationsRef = useRef<Array<{ x: number; y: number }>>([]);
+  const roomRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    const toastTimers = toastTimersRef.current;
+    return () => {
+      toastTimers.forEach((timer) => window.clearTimeout(timer));
+      toastTimers.clear();
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
   const canAddResources = Boolean(room?.isOwner || room?.allowGuestResources);
 
   const showToast = useCallback((message: string, type: ToastMessage["type"] = "info") => {
@@ -159,9 +182,11 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       if (prev.some((toast) => toast.message === message && toast.type === type)) return prev;
       return [...prev.slice(-2), { id, message, type }];
     });
-    setTimeout(() => {
+    const timer = window.setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3500);
+    toastTimersRef.current.add(timer);
   }, []);
 
   const handleBack = useCallback(() => {
@@ -175,9 +200,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
 
   const dismissExpiryNotice = useCallback(() => {
     setHasDismissedExpiryNotice(true);
-    if (typeof window !== "undefined") {
-      localStorage.setItem(`xoomshare-expiry-notice-${pathCode}`, "dismissed");
-    }
+    safeSetItem(`xoomshare-expiry-notice-${pathCode}`, "dismissed");
   }, [pathCode]);
 
   const renderBackButton = (className = "") => (
@@ -198,10 +221,13 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       credentials: "include",
       signal,
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => null);
 
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || "Xoomshare page not found");
+    if (!res.ok || !data?.success) {
+      throw Object.assign(
+        new Error(getApiErrorMessage(data?.error, res.ok ? "Xoomshare page not found" : `Unable to open this Xoomshare room (status ${res.status}).`)),
+        { status: res.status },
+      );
     }
 
     return {
@@ -258,9 +284,22 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     let cancelled = false;
     let reconnectAttempt = 0;
 
+    const refreshController = new AbortController();
     const refreshRoom = () => {
-      void fetchRoom().then(applyRoomData).catch(() => {
-        // Keep the last good canvas visible during a transient network outage.
+      // Several websocket events can arrive back to back; only the newest response may be applied,
+      // and nothing may be applied after this room subscription has been torn down.
+      const requestId = ++roomRequestIdRef.current;
+      void fetchRoom(refreshController.signal).then((data) => {
+        if (cancelled || requestId !== roomRequestIdRef.current) return;
+        applyRoomData(data);
+      }).catch((error: Error & { status?: number }) => {
+        if (cancelled || requestId !== roomRequestIdRef.current) return;
+        // A missing room (destroyed or expired while we were offline) is final; anything else is a
+        // transient outage where the last good canvas should stay visible.
+        if (error.status === 404 || error.status === 410) {
+          setRoom(null);
+          setError(error.message || "This session is no longer available.");
+        }
       });
     };
 
@@ -300,6 +339,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     connect();
     return () => {
       cancelled = true;
+      refreshController.abort();
       if (pingInterval) window.clearInterval(pingInterval);
       if (retryTimer) window.clearTimeout(retryTimer);
       socket?.close();
@@ -402,13 +442,12 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       const data = await res.json();
       
       if (data.success) {
-        setPages((prev) => {
-          const next = prev.filter((p) => p.id !== id);
-          if (activePageId === id && next.length > 0) {
-            handlePageSelect(next[next.length - 1].id);
-          }
-          return next;
-        });
+        const next = pages.filter((p) => p.id !== id);
+        setPages(next);
+        setResources((prev) => prev.filter((resource) => resource.pageId !== id));
+        if (activePageId === id && next.length > 0) {
+          handlePageSelect(next[next.length - 1].id);
+        }
         showToast("Page deleted successfully", "success");
       } else {
         showToast(data.error || "Failed to delete page", "error");
@@ -416,7 +455,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     } catch {
       showToast("Network error deleting page", "error");
     }
-  }, [pathCode, room?.isOwner, activePageId, handlePageSelect, showToast]);
+  }, [pathCode, room?.isOwner, activePageId, handlePageSelect, pages, showToast]);
 
   const handleDeletePage = useCallback((id: string) => {
     setConfirmModal({
@@ -436,7 +475,8 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       canvasRef.current?.panTo(x, y);
     });
     setHighlightedResourceId(id);
-    setTimeout(() => setHighlightedResourceId(null), 3000);
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightedResourceId(null), 3000);
   }, []);
 
   const activePageResources = useMemo(() => {
@@ -464,7 +504,9 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     let direction = 0;
 
     while (isOccupied && attempts < 50) {
-      isOccupied = resources.some((resource) => {
+      // Include spots claimed by uploads that are still in flight; otherwise several files added at
+      // once all read the same stale `resources` and land on top of each other.
+      isOccupied = [...resources, ...placementReservationsRef.current].some((resource) => {
         const resourceX = resource.x ?? 100;
         const resourceY = resource.y ?? 100;
         return !(x + boxWidth <= resourceX || x >= resourceX + boxWidth || y + boxHeight <= resourceY || y >= resourceY + boxHeight);
@@ -498,6 +540,12 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       }
     }
 
+    const reservation = { x, y };
+    placementReservationsRef.current.push(reservation);
+    const releaseReservation = () => {
+      placementReservationsRef.current = placementReservationsRef.current.filter((item) => item !== reservation);
+    };
+
     try {
       const res = await fetch(`${API_BASE}/xoomshare/${encodeURIComponent(pathCode)}/resources`, {
         method: "POST",
@@ -505,10 +553,10 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, content, title, x, y, pageId: activePageId }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
 
-      if (!res.ok || !data.success) {
-        showToast(getApiErrorMessage(data.error, "Unable to save this resource."), "error");
+      if (!res.ok || !data?.success || !data.resource) {
+        showToast(getApiErrorMessage(data?.error, "Unable to save this resource."), "error");
         return;
       }
 
@@ -521,6 +569,8 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       showToast("Resource saved successfully", "success");
     } catch {
       showToast("Network error while saving this resource.", "error");
+    } finally {
+      releaseReservation();
     }
   }, [pathCode, resources, room, showToast, activePageId]);
 
@@ -544,16 +594,16 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
           const imageType = item.types.find((type) => type.startsWith("image/"));
           if (imageType) {
             const blob = await item.getType(imageType);
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste("image", reader.result as string);
-            reader.readAsDataURL(blob);
+            const dataUrl = await readAsDataUrl(blob);
+            if (dataUrl) void processPaste("image", dataUrl);
+            else showToast("That image could not be read.", "error");
           }
         } else if (item.types.includes("application/pdf")) {
           hasItem = true;
           const blob = await item.getType("application/pdf");
-          const reader = new FileReader();
-          reader.onloadend = () => processPaste("pdf", reader.result as string);
-          reader.readAsDataURL(blob);
+          const dataUrl = await readAsDataUrl(blob);
+          if (dataUrl) void processPaste("pdf", dataUrl);
+          else showToast("That PDF could not be read.", "error");
         } else if (item.types.includes("text/plain")) {
           const blob = await item.getType("text/plain");
           const text = await blob.text();
@@ -589,21 +639,21 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     }
 
     for (const file of files) {
-      const reader = new FileReader();
-      if (file.type.startsWith("image/")) {
-        reader.onloadend = () => processPaste("image", reader.result as string, file.name);
-      } else if (file.type === "application/pdf") {
-        reader.onloadend = () => processPaste("pdf", reader.result as string, file.name);
-      } else {
-        reader.onloadend = () => processPaste("file", reader.result as string, file.name);
-      }
-      reader.readAsDataURL(file);
+      const type: Resource["type"] = file.type.startsWith("image/")
+        ? "image"
+        : file.type === "application/pdf"
+          ? "pdf"
+          : "file";
+      void readAsDataUrl(file).then((dataUrl) => {
+        if (dataUrl) void processPaste(type, dataUrl, file.name);
+        else showToast(`Could not read “${file.name}”.`, "error");
+      });
     }
   }, [processPaste, room?.allowGuestResources, room?.isOwner, showToast]);
 
   useEffect(() => {
     const handleGlobalPaste = (event: ClipboardEvent) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable]")) return;
       if ((!room?.isOwner && !room?.allowGuestResources) || !isCanvasMode) return;
 
       const items = Array.from(event.clipboardData?.items || []);
@@ -614,9 +664,11 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
         if (item.type.startsWith("image/") || item.type === "application/pdf") {
           const file = item.getAsFile();
           if (file) {
-            const reader = new FileReader();
-            reader.onloadend = () => processPaste(item.type === "application/pdf" ? "pdf" : "image", reader.result as string, file.name);
-            reader.readAsDataURL(file);
+            const pastedType = item.type === "application/pdf" ? "pdf" : "image";
+            void readAsDataUrl(file).then((dataUrl) => {
+              if (dataUrl) void processPaste(pastedType, dataUrl, file.name);
+              else showToast("That file could not be read.", "error");
+            });
             processed = true;
           }
         } else if (item.type === "text/plain") {
@@ -646,7 +698,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       window.removeEventListener("paste", handleGlobalPaste);
       window.removeEventListener("saveswitch-upload", handleUploadEvent);
     };
-  }, [handleFileUploads, isCanvasMode, processPaste, room?.allowGuestResources, room?.isOwner]);
+  }, [handleFileUploads, isCanvasMode, processPaste, room?.allowGuestResources, room?.isOwner, showToast]);
 
   const handleUpdateResourcePosition = useCallback(async (id: string, x: number, y: number) => {
     const resource = resources.find((candidate) => candidate.id === id);
@@ -1077,9 +1129,9 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       </main>
 
       {editingPageId && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[90] flex items-center justify-center p-4" onKeyDown={(event) => { if (event.key === "Escape") setEditingPageId(null); }}>
           <div className="absolute inset-0 bg-[#4e4d42]/25 backdrop-blur-sm" onClick={() => setEditingPageId(null)} />
-          <form className={`${styles.overlayPanel} relative flex w-full max-w-[340px] flex-col gap-3 rounded-[22px] p-5`} onSubmit={(event) => { event.preventDefault(); handlePageUpdateName(editingPageId, pageNameDraft); setEditingPageId(null); }}>
+          <form role="dialog" aria-modal="true" aria-label="Rename page" className={`${styles.overlayPanel} relative flex w-full max-w-[340px] flex-col gap-3 rounded-[22px] p-5`} onSubmit={(event) => { event.preventDefault(); handlePageUpdateName(editingPageId, pageNameDraft); setEditingPageId(null); }}>
             <label htmlFor="xoomshare-page-name" className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#66665a]">Page name</label>
             <input id="xoomshare-page-name" value={pageNameDraft} onChange={(event) => setPageNameDraft(event.target.value)} autoFocus className={styles.renameInput} />
             <div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => setEditingPageId(null)} className={styles.dialogSecondary}>Cancel</button><button type="submit" className={styles.dialogPrimary}>Save</button></div>
@@ -1088,28 +1140,33 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       )}
 
       {confirmModal && confirmModal.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 pointer-events-auto">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 pointer-events-auto" onKeyDown={(event) => { if (event.key === "Escape") setConfirmModal(null); }}>
           <div 
             className="absolute inset-0 bg-[#4e4d42]/25 backdrop-blur-sm"
             style={{ animation: "modal-fade-in 0.2s ease-out forwards" }}
             onClick={() => setConfirmModal(null)}
           />
           <div 
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="xoomshare-confirm-title"
+            aria-describedby="xoomshare-confirm-message"
             className={`${styles.overlayPanel} relative flex flex-col gap-4 rounded-[22px] p-5`}
             style={{ 
               width: "min(420px, calc(100vw - 32px))",
               animation: "modal-zoom-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards"
             }}
           >
-            <h2 className="m-0 font-jakarta text-[18px] font-semibold text-[#383932]">
+            <h2 id="xoomshare-confirm-title" className="m-0 font-jakarta text-[18px] font-semibold text-[#383932]">
               {confirmModal.title}
             </h2>
-            <p className="m-0 font-arimo text-[13px] leading-relaxed text-[#65665b]">
+            <p id="xoomshare-confirm-message" className="m-0 font-arimo text-[13px] leading-relaxed text-[#65665b]">
               {confirmModal.message}
             </p>
             <div className="mt-4 flex flex-wrap justify-end gap-3">
               <button
                 type="button"
+                autoFocus
                 onClick={() => setConfirmModal(null)}
                 className="rounded-full border border-white/50 bg-white/25 px-4 py-2 font-arimo text-[12px] font-semibold text-[#505147] transition-colors hover:bg-white/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]"
               >
@@ -1132,7 +1189,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
         </div>
       )}
 
-      <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-50 flex flex-col items-end gap-2 sm:bottom-6 sm:left-auto sm:right-6">
+      <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-50 flex flex-col items-end gap-2 sm:bottom-6 sm:left-auto sm:right-6" role="status" aria-live="polite" aria-relevant="additions">
         {toasts.map((toast) => (
           <div
             key={toast.id}

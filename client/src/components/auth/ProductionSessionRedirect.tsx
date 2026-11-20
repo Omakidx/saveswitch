@@ -3,13 +3,14 @@
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { API_BASE } from "@/lib/api";
+import { shouldRedirectAuthenticatedSession } from "./sessionRedirect";
 
 type SessionResponse = {
   authenticated?: boolean;
 };
 
 /**
- * Keeps an authenticated production user in their workspace. Session validity
+ * Sends an authenticated production user from the sign-in pages to their workspace. Session validity
  * stays authoritative at the API, which is important when web and API live on
  * separate domains and the session cookie is not visible to Next.js.
  */
@@ -18,7 +19,7 @@ export default function ProductionSessionRedirect() {
   const router = useRouter();
 
   useEffect(() => {
-    if (process.env.NODE_ENV !== "production" || pathname.startsWith("/dashboard")) {
+    if (process.env.NODE_ENV !== "production" || !shouldRedirectAuthenticatedSession(pathname)) {
       return;
     }
 

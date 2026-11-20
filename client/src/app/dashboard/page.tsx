@@ -9,6 +9,8 @@ import InfiniteCanvas, { CanvasViewState, InfiniteCanvasRef } from "@/components
 import type { Category } from "@/components/dashboard/CategorySwitch";
 import FigmaDashboardChrome from "@/components/dashboard/figma/FigmaDashboardChrome";
 import { API_BASE } from "@/lib/api";
+import { safeGetItem, safeRemoveItem, safeSetItem } from "@/lib/safeStorage";
+import { filterResourcesByCategory } from "@/lib/resourceFilters";
 import { reconcileFetchedResources } from "./resourceReconciliation";
 import {
   canvasViewsEqual,
@@ -212,7 +214,9 @@ export default function DashboardPage() {
 
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [sessionAttempt, setSessionAttempt] = useState(0);
+
   // Keep feedback focused: actionable errors and completed user actions, never a growing notification stack.
   const [toasts, setToasts] = useState<DashboardToast[]>([]);
   const toastTimersRef = useRef<Map<string, number>>(new Map());
@@ -259,6 +263,7 @@ export default function DashboardPage() {
   const [isResourceDragging, setIsResourceDragging] = useState(false);
   const [isPasting, setIsPasting] = useState(false);
   const [ingestionProgress, setIngestionProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [isLoadingPages, setIsLoadingPages] = useState(true);
   const [resourcesPageId, setResourcesPageId] = useState<string | null>(null);
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
   const canvasRef = useRef<InfiniteCanvasRef>(null);
@@ -270,6 +275,7 @@ export default function DashboardPage() {
   const resourceUploadQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const pendingIngestionCountRef = useRef(0);
   const visibilityRef = useRef<Visibility>(initialDashboardState.visibility);
+  const pagesRef = useRef<PageData[]>([]);
   const pagesRequestIdRef = useRef(0);
   const pagesCacheRef = useRef<Record<Visibility, PageData[] | null>>({
     private: null,
@@ -295,6 +301,10 @@ export default function DashboardPage() {
   useEffect(() => {
     activePageIdRef.current = activePageId;
   }, [activePageId]);
+
+  useEffect(() => {
+    pagesRef.current = pages;
+  }, [pages]);
 
   useEffect(() => {
     if (resourcesPageId) {
@@ -331,7 +341,7 @@ export default function DashboardPage() {
 
   const restoreWorkspaceSnapshot = useCallback((mode: Visibility, nextPages: PageData[], preserveCurrentCanvas = false) => {
     const snapshot = workspaceSnapshotRef.current[mode];
-    const storedPageId = snapshot.activePageId ?? localStorage.getItem(`saveswitch-active-page-${mode}`);
+    const storedPageId = snapshot.activePageId ?? safeGetItem(`saveswitch-active-page-${mode}`);
     const activeId = storedPageId && nextPages.some((page) => page.id === storedPageId)
       ? storedPageId
       : nextPages.length > 0
@@ -362,9 +372,9 @@ export default function DashboardPage() {
     setActiveCategory(snapshot.activeCategory);
 
     if (activeId) {
-      localStorage.setItem(`saveswitch-active-page-${mode}`, activeId);
+      safeSetItem(`saveswitch-active-page-${mode}`, activeId);
     } else {
-      localStorage.removeItem(`saveswitch-active-page-${mode}`);
+      safeRemoveItem(`saveswitch-active-page-${mode}`);
     }
 
     const canvasView = snapshot.isCanvasMode && preserveCurrentCanvas && restoredWorkspaceRef.current[mode]
@@ -461,7 +471,15 @@ export default function DashboardPage() {
           credentials: "include",
           signal: controller.signal,
         });
-        if (!res.ok) return;
+        if (controller.signal.aborted) return;
+        if (res.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        if (!res.ok) {
+          showToast("Unable to load this page's resources. Please try again.", "error");
+          return;
+        }
 
         const data = await res.json();
         if (
@@ -484,25 +502,33 @@ export default function DashboardPage() {
       } catch (err) {
         if (controller.signal.aborted) return;
         console.error("Failed to fetch resources", err);
+        showToast("Unable to load this page's resources. Please check your connection.", "error");
       }
     };
     fetchResources();
     return () => controller.abort();
-  }, [activePageId, loading, user, visibility]);
+  }, [activePageId, loading, router, showToast, user, visibility]);
 
   /* ── Fetch user on mount ── */
   useEffect(() => {
     const controller = new AbortController();
 
     async function initUser() {
+      setSessionError(null);
       try {
         const meRes = await fetch(`${API_BASE}/auth/me`, {
           credentials: "include",
           signal: controller.signal,
         });
-        const meData = await meRes.json();
-        if (!meRes.ok || !meData.authenticated || !meData.user) {
+        const meData = await meRes.json().catch(() => null);
+        if (meRes.status === 401 || (meRes.ok && !meData?.authenticated)) {
           router.replace("/login");
+          return;
+        }
+        if (!meRes.ok || !meData?.user) {
+          // A server hiccup is not a signed-out session; let the user retry instead of
+          // leaving them on an endless spinner.
+          setSessionError("We couldn't load your workspace. Please check your connection and try again.");
           return;
         }
 
@@ -510,6 +536,7 @@ export default function DashboardPage() {
       } catch (err) {
         if (controller.signal.aborted) return;
         console.error("Error fetching user", err);
+        setSessionError("We couldn't reach Saveswitch. Please check your connection and try again.");
       } finally {
         if (!controller.signal.aborted) {
           setLoading(false);
@@ -518,7 +545,7 @@ export default function DashboardPage() {
     }
     void initUser();
     return () => controller.abort();
-  }, [router]);
+  }, [router, sessionAttempt]);
 
   /* ── Fetch pages when visibility changes ── */
   useEffect(() => {
@@ -536,6 +563,7 @@ export default function DashboardPage() {
     }
 
     async function fetchPages() {
+      setIsLoadingPages(true);
       try {
         const resRes = await fetch(`${API_BASE}/pages?visibility=${mode}`, {
           credentials: "include",
@@ -564,6 +592,8 @@ export default function DashboardPage() {
 
           if (formattedPages.length === 0 && !autoPageCreationRef.current[mode]) {
             autoPageCreationRef.current[mode] = true;
+            let createdFirstPage = false;
+            try {
             const createResponse = await fetch(`${API_BASE}/pages`, {
               method: "POST",
               credentials: "include",
@@ -587,20 +617,37 @@ export default function DashboardPage() {
                 createdAt: createData.page.created_at,
                 name: createData.page.name,
               }];
+              createdFirstPage = true;
             }
+            } finally {
+              // An aborted or failed attempt must not block creating the first page the
+              // next time this workspace is opened.
+              if (!createdFirstPage) autoPageCreationRef.current[mode] = false;
+            }
+            if (controller.signal.aborted || requestId !== pagesRequestIdRef.current || visibilityRef.current !== mode) {
+              return;
+            }
+            pagesCacheRef.current[mode] = formattedPages;
           }
 
           restoreWorkspaceSnapshot(mode, formattedPages, true);
+        } else if (resRes.status === 401) {
+          router.replace("/login");
+        } else {
+          showToast("Unable to load your pages. Please try again.", "error");
         }
       } catch (err) {
         if (controller.signal.aborted) return;
         console.error("Failed to fetch pages", err);
+        showToast("Unable to load your pages. Please check your connection.", "error");
+      } finally {
+        if (!controller.signal.aborted && requestId === pagesRequestIdRef.current) setIsLoadingPages(false);
       }
     }
 
     fetchPages();
     return () => controller.abort();
-  }, [loading, restorePendingWorkspaceSnapshot, restoreWorkspaceSnapshot, router, user, visibility]);
+  }, [loading, restorePendingWorkspaceSnapshot, restoreWorkspaceSnapshot, router, showToast, user, visibility]);
 
   /* ── Handlers ── */
 
@@ -622,14 +669,23 @@ export default function DashboardPage() {
   );
 
   const handleLogout = useCallback(async () => {
-    await fetch(`${API_BASE}/auth/logout`, {
-      method: "POST",
-      credentials: "include",
-    });
+    try {
+      const res = await fetch(`${API_BASE}/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(`Sign out failed (${res.status})`);
+    } catch (err) {
+      // Navigating away while the session cookie is still valid would only bounce the user back.
+      console.error("Failed to sign out", err);
+      showToast("Couldn't sign out right now. Please try again.", "error");
+      return;
+    }
     window.location.href = "/login";
-  }, []);
+  }, [showToast]);
 
   const handleAddPage = useCallback(async () => {
+    const requestedVisibility = visibility;
     const randomColor = createNewCanvasColor();
     
     // Ensure unique default name for the day
@@ -667,14 +723,24 @@ export default function DashboardPage() {
         createdAt: data.page.created_at,
         name: data.page.name,
       };
+      if (visibilityRef.current !== requestedVisibility) {
+        // The user switched workspace while this request was in flight; the page belongs to the
+        // other workspace's list, so only record it there.
+        const cached = pagesCacheRef.current[requestedVisibility];
+        if (cached && !cached.some((page) => page.id === newPage.id)) {
+          pagesCacheRef.current[requestedVisibility] = [...cached, newPage];
+        }
+        showToast("Page created successfully!", "success");
+        return;
+      }
       setPages((prev) => {
         const next = [...prev, newPage];
-        pagesCacheRef.current[visibility] = next;
+        pagesCacheRef.current[requestedVisibility] = next;
         return next;
       });
       setActivePageId(newPage.id);
       setSelectedDate(todayPrefix);
-      localStorage.setItem(`saveswitch-active-page-${visibility}`, newPage.id);
+      safeSetItem(`saveswitch-active-page-${visibility}`, newPage.id);
       if (shouldAutoEnterCanvasAfterCreate()) {
         setIsCanvasMode(true);
       }
@@ -688,7 +754,7 @@ export default function DashboardPage() {
 
   const handlePageSelect = useCallback((id: string) => {
     setActivePageId(id);
-    localStorage.setItem(`saveswitch-active-page-${visibility}`, id);
+    safeSetItem(`saveswitch-active-page-${visibility}`, id);
     setIsCanvasMode(true);
   }, [visibility]);
 
@@ -703,42 +769,64 @@ export default function DashboardPage() {
 
   const handleCardSwipe = useCallback((id: string) => {
     setActivePageId(id);
-    localStorage.setItem(`saveswitch-active-page-${visibility}`, id);
+    safeSetItem(`saveswitch-active-page-${visibility}`, id);
   }, [visibility]);
 
   const executeDeletePage = useCallback(async (id: string) => {
-    setPages((prev) => {
-      const filtered = prev.filter(p => p.id !== id);
-      pagesCacheRef.current[visibility] = filtered;
-      // Update active page id if we deleted the currently active page
-      if (id === activePageId) {
-        if (filtered.length > 0) {
-          // Default to the last created one or the first one
-          const newId = filtered[filtered.length - 1].id;
-          setActivePageId(newId);
-          localStorage.setItem(`saveswitch-active-page-${visibility}`, newId);
-        } else {
-          setActivePageId(null);
-          localStorage.removeItem(`saveswitch-active-page-${visibility}`);
-        }
-      }
-      return filtered;
-    });
+    const requestedVisibility = visibilityRef.current;
+    const previousPages = pagesRef.current;
+    const removedIndex = previousPages.findIndex((page) => page.id === id);
+    const removedPage = removedIndex === -1 ? null : previousPages[removedIndex];
+    const filtered = previousPages.filter((page) => page.id !== id);
+
+    pagesCacheRef.current[requestedVisibility] = filtered;
+    setPages(filtered);
+    // Default to the last created page when the active one was deleted.
+    if (id === activePageIdRef.current) {
+      const newId = filtered.length > 0 ? filtered[filtered.length - 1].id : null;
+      setActivePageId(newId);
+      if (newId) safeSetItem(`saveswitch-active-page-${requestedVisibility}`, newId);
+      else safeRemoveItem(`saveswitch-active-page-${requestedVisibility}`);
+    }
+
+    const restoreRemovedPage = () => {
+      if (!removedPage) return;
+      const restore = (list: PageData[]) => {
+        if (list.some((page) => page.id === removedPage.id)) return list;
+        const next = [...list];
+        next.splice(Math.min(removedIndex, next.length), 0, removedPage);
+        return next;
+      };
+      const cached = pagesCacheRef.current[requestedVisibility];
+      if (cached) pagesCacheRef.current[requestedVisibility] = restore(cached);
+      if (visibilityRef.current === requestedVisibility) setPages(restore);
+    };
 
     try {
       const res = await fetch(`${API_BASE}/pages/${id}`, {
         method: "DELETE",
         credentials: "include",
       });
+      if (res.status === 404) {
+        // Already deleted elsewhere (e.g. another tab); keep it removed.
+        return;
+      }
       if (!res.ok) {
+        // The server kept the page, so bring it back rather than showing a lie.
+        restoreRemovedPage();
         const errData = await res.json().catch(() => ({}));
-        showToast(`Failed to delete page: ${errData.error || 'Unknown error'}`, 'error');
+        if (res.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        showToast(`Failed to delete page: ${getApiErrorMessage(errData?.error, "Unknown error")}`, 'error');
       }
     } catch (err) {
       console.error("Failed to delete page", err);
+      restoreRemovedPage();
       showToast("A network error occurred while deleting the page.", 'error');
     }
-  }, [activePageId, showToast, visibility]);
+  }, [router, showToast]);
 
   const handleDeletePage = useCallback((id: string) => {
     setConfirmModal({
@@ -752,21 +840,36 @@ export default function DashboardPage() {
     });
   }, [executeDeletePage]);
 
-  const handleUpdateResourcePosition = async (id: string, x: number, y: number) => {
+  const handleUpdateResourcePosition = useCallback(async (id: string, x: number, y: number) => {
+    const previous = resourceCacheRef.current[activePageIdRef.current ?? ""]?.find((resource) => resource.id === id);
+    const previousPosition = previous ? { x: previous.x, y: previous.y } : null;
+    const revertPosition = () => {
+      if (previousPosition) {
+        setResources((prev) => prev.map((resource) => resource.id === id ? { ...resource, ...previousPosition } : resource));
+      }
+    };
+
     // Optimistic update
     setResources(prev => prev.map(r => r.id === id ? { ...r, x, y } : r));
-    
+
     try {
-      await fetch(`${API_BASE}/resources/${id}/position`, {
+      const res = await fetch(`${API_BASE}/resources/${id}/position`, {
         method: "PATCH",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ x, y }),
       });
+      if (!res.ok) {
+        // Otherwise the card would silently snap back to its old spot after the next reload.
+        revertPosition();
+        showToast("Couldn't save the new position. Please try again.", "error");
+      }
     } catch (err) {
       console.error("Failed to update position", err);
+      revertPosition();
+      showToast("Couldn't save the new position. Please check your connection.", "error");
     }
-  };
+  }, [showToast]);
 
   const handleUpdateTextResource = useCallback(async (id: string, content: string) => {
     try {
@@ -1072,18 +1175,25 @@ export default function DashboardPage() {
 
       event.preventDefault();
       const targetPageId = activePageId;
+      // DataTransferItems are only readable while the paste event is being dispatched. Read every
+      // item now; touching them after an await yields null files and callbacks that never run.
+      const snapshot = items.map((item) => ({
+        text: item.type === "text/plain"
+          ? new Promise<string>((resolve) => item.getAsString(resolve))
+          : null,
+        file: item.type === "text/plain" ? null : item.getAsFile(),
+      }));
       const processItems = async () => {
         let savedCount = 0;
         beginResourceIngestion();
         try {
-          for (const item of items) {
-            if (item.type === "text/plain") {
-              const text = (await new Promise<string>((resolve) => item.getAsString(resolve))).trim();
+          for (const { text: pendingText, file } of snapshot) {
+            if (pendingText) {
+              const text = (await pendingText).trim();
               if (text && await processPaste(isHttpUrl(text) ? "link" : "text", text, undefined, targetPageId)) savedCount += 1;
               continue;
             }
 
-            const file = item.getAsFile();
             if (file && file.size > 0 && file.size <= MAX_RESOURCE_UPLOAD_BYTES) {
               const type = resourceTypeForFile(file);
               const content = await readResourceFileContent(file, type);
@@ -1118,11 +1228,31 @@ export default function DashboardPage() {
   /* ── Active Page state ── */
   const activePage = pages.find(p => p.id === activePageId);
   const visibleResources = resourcesPageId === activePageId ? resources : [];
-  const filteredResources = activeCategory === 'target'
-    ? visibleResources
-    : visibleResources.filter(r => activeCategory === 'video' ? r.type === 'file' : activeCategory === 'image' ? r.type === 'image' : activeCategory === 'document' ? r.type === 'pdf' || r.type === 'text' : r.type === 'link');
+  const filteredResources = filterResourcesByCategory(visibleResources, activeCategory);
 
   /* ── Loading state ── */
+  if (sessionError && !user) {
+    return (
+      <main className="flex h-dvh w-full flex-1 items-center justify-center bg-white px-6 text-center" role="alert">
+        <div className="flex max-w-sm flex-col items-center gap-4">
+          <h1 className="font-jakarta text-lg font-semibold text-[#25241f]">Can&apos;t open your workspace</h1>
+          <p className="font-arimo text-sm text-[#5d5e54]">{sessionError}</p>
+          <button
+            type="button"
+            className="cursor-pointer rounded-full border-none bg-[#25241f] px-5 py-2.5 font-arimo text-sm font-semibold text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]"
+            onClick={() => {
+              setSessionError(null);
+              setLoading(true);
+              setSessionAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      </main>
+    );
+  }
+
   if (loading || !user) {
     return <LoadingSpinner />;
   }
@@ -1186,8 +1316,9 @@ export default function DashboardPage() {
             onFileUploads={handleFileUploads}
             onPaste={handlePaste}
             isResourceIngesting={isPasting}
+            isLoadingPages={isLoadingPages}
             ingestionProgress={ingestionProgress}
-            onOpenProfile={() => window.location.assign("/dashboard/profile")}
+            onOpenProfile={() => router.push("/dashboard/profile")}
             onLogout={handleLogout}
           />
         </div>
@@ -1253,7 +1384,7 @@ export default function DashboardPage() {
 
       {/* ── Global Confirmation Modal ── */}
       {confirmModal && confirmModal.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-auto">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-auto" onKeyDown={(event) => { if (event.key === "Escape") setConfirmModal(null); }}>
           {/* Backdrop */}
           <div 
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -1262,21 +1393,26 @@ export default function DashboardPage() {
           />
           {/* Modal Content */}
           <div 
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="dashboard-confirm-title"
+            aria-describedby="dashboard-confirm-message"
             className="relative bg-[var(--color-surface)] border border-[var(--color-surface-border)] rounded-2xl shadow-2xl p-6 flex flex-col gap-4"
             style={{ 
               width: "min(420px, calc(100vw - 32px))",
               animation: "modal-zoom-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards"
             }}
           >
-            <h2 className="font-jakarta text-xl font-bold m-0" style={{ color: "var(--color-text-primary)" }}>
+            <h2 id="dashboard-confirm-title" className="font-jakarta text-xl font-bold m-0" style={{ color: "var(--color-text-primary)" }}>
               {confirmModal.title}
             </h2>
-            <p className="font-arimo text-[15px] m-0 leading-relaxed" style={{ color: "var(--color-text-primary)", opacity: 0.8 }}>
+            <p id="dashboard-confirm-message" className="font-arimo text-[15px] m-0 leading-relaxed" style={{ color: "var(--color-text-primary)", opacity: 0.8 }}>
               {confirmModal.message}
             </p>
             <div className="flex justify-end gap-3 mt-4">
               <button
                 type="button"
+                autoFocus
                 onClick={() => setConfirmModal(null)}
                 className="px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-colors hover:bg-white/10 bg-transparent border-none"
                 style={{ color: "var(--color-text-primary)" }}

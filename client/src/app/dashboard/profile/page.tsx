@@ -104,6 +104,10 @@ export default function ProfilePage() {
         signal: controller.signal,
       });
 
+      if (response.status === 401) {
+        router.replace("/login");
+        return;
+      }
       if (!response.ok) throw new Error("Unable to load your profile right now.");
       const data = await response.json();
 
@@ -217,9 +221,17 @@ export default function ProfilePage() {
       return;
     }
 
+    const input = event.target;
     const reader = new FileReader();
-    reader.onloadend = () => setPicture(typeof reader.result === "string" ? reader.result : "");
-    reader.onerror = () => showNotice({ tone: "error", message: "That image could not be read. Please try another file." });
+    // onload (not onloadend): a failed read must not blank the current picture.
+    reader.onload = () => {
+      if (typeof reader.result === "string") setPicture(reader.result);
+      input.value = "";
+    };
+    reader.onerror = () => {
+      showNotice({ tone: "error", message: "That image could not be read. Please try another file." });
+      input.value = "";
+    };
     reader.readAsDataURL(file);
   };
 
@@ -268,10 +280,14 @@ export default function ProfilePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
 
-      if (!response.ok || !data.success || !data.user) {
-        throw new Error(data.error || "Failed to save profile.");
+      if (response.status === 401) {
+        router.replace("/login");
+        return;
+      }
+      if (!response.ok || !data?.success || !data.user) {
+        throw new Error(typeof data?.error === "string" && data.error ? data.error : "Failed to save profile.");
       }
 
       const canonicalUser = data.user as User;
