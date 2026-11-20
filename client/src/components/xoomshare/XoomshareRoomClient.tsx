@@ -8,6 +8,9 @@ import CardStack from "@/components/dashboard/CardStack";
 import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
 import FigmaDashboardChrome, { chromeStyles, type ChromeMenuItem } from "@/components/dashboard/figma/FigmaDashboardChrome";
 import { filterResourcesByCategory } from "@/lib/resourceFilters";
+import Toaster from "@/components/feedback/Toaster";
+import ConfirmDialog from "@/components/feedback/ConfirmDialog";
+import LoadingSpinner from "@/components/LoadingSpinner";
 import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
 import { API_BASE } from "@/lib/api";
@@ -136,7 +139,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     message: string;
     onConfirm: () => void;
     confirmLabel?: string;
-    confirmClassName?: string;
+    tone?: "danger" | "neutral";
   } | null>(null);
 
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
@@ -814,9 +817,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
         ? "Visitors will no longer be able to add resources to this page. Existing guest resources will remain."
         : "Anyone with the link will be able to add their own resources to this page. They won\u2019t be able to modify or delete resources created by others.",
       confirmLabel: isCurrentlyOpen ? "Restrict" : "Open access",
-      confirmClassName: isCurrentlyOpen
-        ? "flex items-center gap-2 px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-all bg-orange-600 hover:bg-orange-700 text-white shadow-md hover:shadow-lg active:scale-95 border-none"
-        : "flex items-center gap-2 px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-all bg-emerald-600 hover:bg-emerald-700 text-white shadow-md hover:shadow-lg active:scale-95 border-none",
+      tone: "neutral",
       onConfirm: () => {
         setConfirmModal(null);
         handleToggleGuestAccess();
@@ -847,10 +848,9 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const handleDestroySessionWithConfirm = useCallback(() => {
     setConfirmModal({
       isOpen: true,
-      title: "Destroy Session",
-      message: "Are you sure you want to destroy this Xoomshare session? All files will be permanently deleted.",
-      confirmLabel: "Destroy Session",
-      confirmClassName: "flex items-center gap-2 px-5 py-2.5 rounded-xl font-arimo text-sm font-semibold cursor-pointer transition-all bg-red-600 hover:bg-red-700 text-white shadow-md hover:shadow-lg active:scale-95 border-none",
+      title: "Destroy room",
+      message: "Destroy this Xoomshare room now? Everything in it will be permanently deleted for everyone.",
+      confirmLabel: "Destroy room",
       onConfirm: () => {
         setConfirmModal(null);
         handleDestroySession();
@@ -859,14 +859,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   }, [handleDestroySession]);
 
   if (loading) {
-    return (
-      <main className={`${styles.unavailable} flex items-center justify-center px-5 font-inter`} aria-busy="true" aria-live="polite">
-        <div className={`${styles.overlayPanel} flex min-w-[190px] flex-col items-center rounded-2xl px-6 py-5`}>
-          <span className="h-3 w-3 animate-bounce rounded-full bg-[#176bff]" aria-hidden="true" />
-          <p className="mt-3 text-[12px] font-medium text-[#5d5e54]">Opening Xoomshare room</p>
-        </div>
-      </main>
-    );
+    return <LoadingSpinner />;
   }
 
   if (error || !room || hasRoomExpired) {
@@ -1025,105 +1018,45 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
 
       {editingPageId && (
         <div className="fixed inset-0 z-[90] flex items-center justify-center p-4" onKeyDown={(event) => { if (event.key === "Escape") setEditingPageId(null); }}>
-          <div className="absolute inset-0 bg-[#4e4d42]/25 backdrop-blur-sm" onClick={() => setEditingPageId(null)} />
-          <form role="dialog" aria-modal="true" aria-label="Rename page" className={`${styles.overlayPanel} relative flex w-full max-w-[340px] flex-col gap-3 rounded-[22px] p-5`} onSubmit={(event) => { event.preventDefault(); handlePageUpdateName(editingPageId, pageNameDraft); setEditingPageId(null); }}>
-            <label htmlFor="xoomshare-page-name" className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#66665a]">Page name</label>
-            <input id="xoomshare-page-name" value={pageNameDraft} onChange={(event) => setPageNameDraft(event.target.value)} autoFocus className={styles.renameInput} />
-            <div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => setEditingPageId(null)} className={styles.dialogSecondary}>Cancel</button><button type="submit" className={styles.dialogPrimary}>Save</button></div>
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setEditingPageId(null)} />
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="xoomshare-rename-title"
+            className="relative flex flex-col gap-4 rounded-2xl border border-[var(--color-surface-border)] bg-[var(--color-surface)] p-6 shadow-2xl"
+            style={{ width: "min(420px, calc(100vw - 32px))" }}
+            onSubmit={(event) => { event.preventDefault(); handlePageUpdateName(editingPageId, pageNameDraft); setEditingPageId(null); }}
+          >
+            <h2 id="xoomshare-rename-title" className="m-0 font-jakarta text-xl font-bold" style={{ color: "var(--color-text-primary)" }}>Rename page</h2>
+            <label htmlFor="xoomshare-page-name" className="sr-only">Page name</label>
+            <input
+              id="xoomshare-page-name"
+              value={pageNameDraft}
+              onChange={(event) => setPageNameDraft(event.target.value)}
+              autoFocus
+              maxLength={255}
+              className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 font-arimo text-[15px] text-white outline-none placeholder:text-white/40 focus:border-[#4570ff]"
+            />
+            <div className="mt-2 flex justify-end gap-3">
+              <button type="button" onClick={() => setEditingPageId(null)} className="cursor-pointer rounded-xl border-none bg-transparent px-5 py-2.5 font-arimo text-sm font-semibold text-white transition-colors hover:bg-white/10">Cancel</button>
+              <button type="submit" className="cursor-pointer rounded-xl border border-white/20 bg-white/90 px-5 py-2.5 font-arimo text-sm font-semibold text-[#111] shadow-md transition-all hover:bg-white active:scale-95">Save</button>
+            </div>
           </form>
         </div>
       )}
 
       {confirmModal && confirmModal.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 pointer-events-auto" onKeyDown={(event) => { if (event.key === "Escape") setConfirmModal(null); }}>
-          <div 
-            className="absolute inset-0 bg-[#4e4d42]/25 backdrop-blur-sm"
-            style={{ animation: "modal-fade-in 0.2s ease-out forwards" }}
-            onClick={() => setConfirmModal(null)}
-          />
-          <div 
-            role="alertdialog"
-            aria-modal="true"
-            aria-labelledby="xoomshare-confirm-title"
-            aria-describedby="xoomshare-confirm-message"
-            className={`${styles.overlayPanel} relative flex flex-col gap-4 rounded-[22px] p-5`}
-            style={{ 
-              width: "min(420px, calc(100vw - 32px))",
-              animation: "modal-zoom-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards"
-            }}
-          >
-            <h2 id="xoomshare-confirm-title" className="m-0 font-jakarta text-[18px] font-semibold text-[#383932]">
-              {confirmModal.title}
-            </h2>
-            <p id="xoomshare-confirm-message" className="m-0 font-arimo text-[13px] leading-relaxed text-[#65665b]">
-              {confirmModal.message}
-            </p>
-            <div className="mt-4 flex flex-wrap justify-end gap-3">
-              <button
-                type="button"
-                autoFocus
-                onClick={() => setConfirmModal(null)}
-                className="rounded-full border border-white/50 bg-white/25 px-4 py-2 font-arimo text-[12px] font-semibold text-[#505147] transition-colors hover:bg-white/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmModal.onConfirm}
-                className={`${styles.modalAction} ${confirmModal.title.includes("Delete") || confirmModal.title.includes("Destroy") ? styles.modalDanger : ""} flex items-center gap-2 rounded-full px-4 py-2 font-arimo text-[12px] font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]`}
-              >
-                {!confirmModal.confirmLabel && (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M4 7h16m-10 4v6m4-6v6M9 7l1-3h4l1 3m-9 0 1 14h10l1-14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
-                {confirmModal.confirmLabel || "Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmLabel={confirmModal.confirmLabel}
+          tone={confirmModal.tone}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
       )}
 
-      <div className="pointer-events-none fixed bottom-4 left-4 right-4 z-50 flex flex-col items-end gap-2 sm:bottom-6 sm:left-auto sm:right-6" role="status" aria-live="polite" aria-relevant="additions">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className={`${styles.toast} ${toast.type === "error" ? styles.toastError : ""} pointer-events-auto flex w-full items-center gap-2 rounded-full px-3 py-2 sm:w-auto`}
-            style={{
-              maxWidth: "min(340px, calc(100vw - 32px))",
-              transformOrigin: "bottom right",
-              animation: "toast-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards",
-            }}
-          >
-            {toast.type === "error" && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FF2A2A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-              </svg>
-            )}
-            <span
-              className="font-arimo text-[11px] font-medium leading-4"
-              style={{ overflowWrap: "anywhere" }}
-            >
-              {toast.message}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <style dangerouslySetInnerHTML={{__html: `
-        @keyframes toast-slide-in {
-          from {
-            opacity: 0;
-            transform: translateY(20px) scale(0.95);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0) scale(1);
-          }
-        }
-      `}} />
+      <Toaster toasts={toasts} />
     </div>
   );
 }

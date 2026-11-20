@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import DashboardSidebar from "@/components/dashboard/DashboardSidebar";
+import { useState, useEffect, useCallback, useRef } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import CardStack from "@/components/dashboard/CardStack";
 import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
-import ResourceNavigator from "@/components/dashboard/ResourceNavigator";
-import CategorySwitch, { Category } from "@/components/dashboard/CategorySwitch";
-import FloatingActionButton from "@/components/dashboard/FloatingActionButton";
+import type { Category } from "@/components/dashboard/CategorySwitch";
+import FigmaDashboardChrome, { chromeStyles, type ChromeMenuItem } from "@/components/dashboard/figma/FigmaDashboardChrome";
+import Toaster, { type ToastItem } from "@/components/feedback/Toaster";
 import LoadingSpinner from "@/components/LoadingSpinner";
 import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
@@ -49,11 +50,11 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
   const [resourcesPageId, setResourcesPageId] = useState<string | null>(null);
-  const [isCanvasMode, setIsCanvasMode] = useState(() => safeGetItem(`saveswitch-public-canvas-${username}`) === 'true');
   const [activeCategory, setActiveCategory] = useState<Category>(() =>
     parseCategory(safeGetItem(`saveswitch-public-category-${username}`)));
   const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const router = useRouter();
 
   const canvasRef = useRef<InfiniteCanvasRef>(null);
   const canvasOffsetRef = useRef({ x: 0, y: 0 });
@@ -174,76 +175,7 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
     };
   }, [activePageId]);
 
-  // Sidebar grouping logic (reusing same logic from DashboardPage)
-  const dateGroups = useMemo(() => {
-    const groups: { [key: string]: { label: string; date: string; pages: PageData[] } } = {};
-    const now = new Date();
-
-    const getGroupKey = (dateStr: string) => {
-      const d = new Date(dateStr);
-      const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 3600 * 24));
-      if (diffDays === 0) return "Today";
-      if (diffDays === 1) return "Yesterday";
-      if (diffDays <= 7) return "Previous 7 Days";
-      if (diffDays <= 30) return "Previous 30 Days";
-      return d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
-    };
-
-    pages.forEach((page) => {
-      const key = getGroupKey(page.createdAt);
-      if (!groups[key]) {
-        groups[key] = { label: key, date: key, pages: [] };
-      }
-      groups[key].pages.push(page);
-    });
-
-    Object.values(groups).forEach(g => {
-      g.pages.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    });
-
-    const order = ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days"];
-    return Object.values(groups).sort((a, b) => {
-      const idxA = order.indexOf(a.label);
-      const idxB = order.indexOf(b.label);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return new Date(b.pages[0].createdAt).getTime() - new Date(a.pages[0].createdAt).getTime();
-    });
-  }, [pages]);
-
-  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
-
-  const activeGroupDate = useMemo(() => {
-    return dateGroups.find(g => g.pages.some(p => p.id === activePageId))?.date ?? null;
-  }, [activePageId, dateGroups]);
-
-  const visibleExpandedDates = useMemo(() => {
-    const next = new Set(expandedDates);
-    if (activeGroupDate) next.add(activeGroupDate);
-    return next;
-  }, [activeGroupDate, expandedDates]);
-
-  const handleToggleExpand = useCallback((date: string) => {
-    setExpandedDates(prev => {
-      const next = new Set(prev);
-      if (next.has(date)) next.delete(date);
-      else next.add(date);
-      return next;
-    });
-  }, []);
-
-  const handleDateSelect = useCallback((date: string) => {
-    setSelectedDate(date);
-  }, []);
-
   const handlePageSelect = useCallback((id: string) => {
-    setActivePageId(id);
-    setIsCanvasMode(true);
-  }, []);
-
-  const handleCardSwipe = useCallback((id: string) => {
     setActivePageId(id);
   }, []);
 
@@ -255,27 +187,47 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
   }, [activePageId, username]);
 
   useEffect(() => {
-    safeSetItem(`saveswitch-public-canvas-${username}`, isCanvasMode.toString());
-  }, [isCanvasMode, username]);
-
-  useEffect(() => {
     safeSetItem(`saveswitch-public-category-${username}`, activeCategory);
   }, [activeCategory, username]);
 
   const panTimerRef = useRef<number | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (panTimerRef.current) window.clearTimeout(panTimerRef.current);
-    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+  const toastTimersRef = useRef(new Set<number>());
+  useEffect(() => {
+    const toastTimers = toastTimersRef.current;
+    return () => {
+      if (panTimerRef.current) window.clearTimeout(panTimerRef.current);
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+      toastTimers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, []);
 
-  const handlePanToResource = useCallback((id: string, x: number, y: number) => {
-    setIsCanvasMode(true);
-    setHighlightedResourceId(id);
+  const showToast = useCallback((message: string, type: ToastItem["type"] = "info") => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setToasts((previous) => [...previous.slice(-1), { id, message, type }]);
+    const timer = window.setTimeout(() => {
+      toastTimersRef.current.delete(timer);
+      setToasts((previous) => previous.filter((toast) => toast.id !== id));
+    }, 3500);
+    toastTimersRef.current.add(timer);
+  }, []);
+
+  const handleCopyProfileLink = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      showToast("Profile link copied", "success");
+    } catch {
+      showToast("Couldn't copy the link. Copy it from the address bar instead.", "error");
+    }
+  }, [showToast]);
+
+  const handlePanToResource = useCallback((resource: Resource, category: Category) => {
+    setActiveCategory(category);
+    setHighlightedResourceId(resource.id);
 
     if (panTimerRef.current) window.clearTimeout(panTimerRef.current);
     panTimerRef.current = window.setTimeout(() => {
-      canvasRef.current?.panTo(x, y);
+      canvasRef.current?.panTo(resource.x ?? 100, resource.y ?? 100);
     }, 100);
 
     if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
@@ -284,89 +236,106 @@ export default function PublicProfileClient({ username }: PublicProfileClientPro
     }, 3000);
   }, []);
 
+  const handleCanvasPageNavigation = useCallback((direction: "previous" | "next") => {
+    if (pages.length < 2) return;
+    const index = Math.max(0, pages.findIndex((page) => page.id === activePageId));
+    const nextIndex = direction === "next"
+      ? Math.min(pages.length - 1, index + 1)
+      : Math.max(0, index - 1);
+    setActivePageId(pages[nextIndex].id);
+  }, [activePageId, pages]);
+
   if (loading) {
     return <LoadingSpinner />;
   }
 
   if (error || !user) {
     return (
-      <div className="flex h-dvh w-full items-center justify-center bg-[#191818] px-4 text-center text-white">
-        <h2 className="text-xl">{error || "User not found"}</h2>
-      </div>
+      <main className="flex h-dvh w-full items-center justify-center px-6 font-inter" style={{ background: "#fffDCE" }}>
+        <div className="flex w-full max-w-[340px] flex-col items-center gap-3 rounded-2xl border border-[var(--color-surface-border)] bg-[var(--color-surface)] px-6 py-7 text-center shadow-2xl">
+          <h1 className="m-0 font-jakarta text-lg font-bold text-white">{error || "User not found"}</h1>
+          <p className="m-0 font-arimo text-[13px] leading-relaxed text-white/70">
+            {error === "User not found" || !error
+              ? `There is no public Saveswitch profile at @${username}.`
+              : "Please try again in a moment."}
+          </p>
+          <Link href="/login" className="mt-2 rounded-xl border border-white/20 bg-white/90 px-5 py-2.5 font-arimo text-sm font-semibold text-[#111] transition-colors hover:bg-white">
+            Go to Saveswitch
+          </Link>
+        </div>
+      </main>
     );
   }
 
   const activePage = pages.find(p => p.id === activePageId);
   const visibleResources = resourcesPageId === activePageId ? resources : [];
   const filteredResources = filterResourcesByCategory(visibleResources, activeCategory);
+  const profileMenuItems: ChromeMenuItem[] = [
+    { label: "Copy profile link", onSelect: () => { void handleCopyProfileLink(); } },
+    { label: "Open Saveswitch", onSelect: () => router.push("/login") },
+  ];
 
   return (
-    <div className="flex h-dvh w-full overflow-hidden text-[#F8F8F8]">
-      <DashboardSidebar
-        user={user}
-        dateGroups={dateGroups}
-        selectedDate={selectedDate}
-        expandedDates={visibleExpandedDates}
-        onDateSelect={handleDateSelect}
-        onToggleExpand={handleToggleExpand}
-        onPageSelect={handlePageSelect}
-        onPageUpdateName={() => {}}
-        activePageId={activePageId}
-        onLogout={() => {}}
-        collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-        onDeletePage={() => {}}
-        readOnly={true}
-      />
-
-      <main
-        className="relative flex h-dvh flex-1 flex-col overflow-hidden"
-        style={{ background: "var(--color-app-bg)" }}
-      >
-        <div className="relative flex-1 flex flex-col overflow-hidden bg-black">
-          {/* Top Right Controls (Category Switch) */}
-          <div className="absolute right-4 top-4 z-40 flex items-center gap-3 pointer-events-auto sm:right-8 sm:top-8">
-            <CategorySwitch activeCategory={activeCategory} onChange={setActiveCategory} />
-          </div>
-
-          <ResourceNavigator
-            resources={filteredResources}
-            onSelectResource={handlePanToResource}
-            isActive={isCanvasMode}
-          />
-
-          <InfiniteCanvas ref={canvasRef} isActive={isCanvasMode} canvasColor={activePage?.color || "var(--color-app-bg)"} canvasOffsetRef={canvasOffsetRef}>
-            <div className="flex-1 flex items-center justify-center h-full w-full">
-            {pages.length > 0 ? (
-              <CardStack
-                pages={pages}
-                activePageId={activePageId}
-                isExpanded={isCanvasMode}
-                onPageSelect={handleCardSwipe}
-                resources={filteredResources}
-                readOnly={true}
-                highlightedResourceId={highlightedResourceId}
-              />
-            ) : (
-              <div className="flex flex-col items-center justify-center w-full h-full">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/icons/saveswitch-logo.svg" alt="" className="w-16 h-16 opacity-20 mb-4" />
-                <h2 className="text-white/40 text-xl font-bold">This user has no public pages</h2>
-              </div>
-            )}
+    <>
+      <main className="relative h-dvh w-full shrink-0 overflow-hidden" style={{ background: "#fffDCE" }}>
+        <div className="relative h-full overflow-hidden">
+          <InfiniteCanvas
+            ref={canvasRef}
+            isActive
+            canvasColor={activePage?.color || "#fffDCE"}
+            canvasOffsetRef={canvasOffsetRef}
+            onNavigatePage={handleCanvasPageNavigation}
+          >
+            <div className="flex h-full w-full flex-1 items-center justify-center">
+              {pages.length > 0 ? (
+                <CardStack
+                  pages={pages}
+                  activePageId={activePageId}
+                  isExpanded
+                  onPageSelect={handlePageSelect}
+                  resources={filteredResources}
+                  readOnly
+                  highlightedResourceId={highlightedResourceId}
+                />
+              ) : null}
             </div>
           </InfiniteCanvas>
 
-          {/* ── Minimizer Button (Bottom Right) ── */}
-          <div className="absolute bottom-4 right-4 z-10 pointer-events-auto sm:bottom-6 sm:right-6">
-            <FloatingActionButton 
-              onClick={() => setIsCanvasMode(!isCanvasMode)} 
-              isActive={isCanvasMode} 
-              readOnly={true}
-            />
-          </div>
+          {pages.length === 0 && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-6">
+              <p className="m-0 rounded-2xl bg-[rgba(30,30,30,0.58)] px-5 py-3 text-center font-arimo text-[13px] font-semibold text-white backdrop-blur-xl">
+                @{username} hasn&apos;t shared any public pages yet.
+              </p>
+            </div>
+          )}
+
+          <FigmaDashboardChrome
+            user={{ name: user.name, email: user.email }}
+            pages={pages}
+            resources={visibleResources}
+            activePageId={activePageId}
+            activeCategory={activeCategory}
+            onPageSelect={handlePageSelect}
+            onCategoryChange={setActiveCategory}
+            onResourceSelect={handlePanToResource}
+            canAddPage={false}
+            canAddResources={false}
+            menuItems={profileMenuItems}
+            menuTitle={user.name || `@${username}`}
+            menuButtonLabel={`About @${username}`}
+            bottomLeading={
+              <div className={chromeStyles.bottomTab}>
+                <button type="button" onClick={handleCopyProfileLink} title="Copy profile link" aria-label={`Copy link to @${username}'s profile`}>
+                  <span className={chromeStyles.bottomTabText}>@{username}</span>
+                </button>
+                <span className={chromeStyles.bottomTabMuted}>Public</span>
+              </div>
+            }
+          />
         </div>
       </main>
-    </div>
+
+      <Toaster toasts={toasts} />
+    </>
   );
 }

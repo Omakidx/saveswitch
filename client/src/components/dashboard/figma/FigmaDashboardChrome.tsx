@@ -33,13 +33,15 @@ interface FigmaDashboardChromeProps {
   visibility?: Visibility;
   onPageSelect: (id: string) => void;
   onDeletePage?: (id: string) => void;
-  onAddPage: () => void | Promise<void>;
+  /** Omit for read-only pages. */
+  onAddPage?: () => void | Promise<void>;
   onCategoryChange: (category: Category) => void;
   onResourceSelect: (resource: Resource, category: Category) => void;
-  onDeleteResource: (id: string) => void;
+  onDeleteResource?: (id: string) => void;
   onVisibilityChange?: (visibility: Visibility) => void;
-  onFileUploads: (files: File[]) => void | Promise<void>;
-  onPaste: () => void | Promise<void>;
+  /** Omit both to hide the add-resources button (read-only pages). */
+  onFileUploads?: (files: File[]) => void | Promise<void>;
+  onPaste?: () => void | Promise<void>;
   isResourceIngesting?: boolean;
   isLoadingPages?: boolean;
   ingestionProgress?: { completed: number; total: number } | null;
@@ -190,7 +192,7 @@ export default function FigmaDashboardChrome({
   onLogout,
   topLeading,
   bottomLeading,
-  canAddPage = true,
+  canAddPage: canAddPageProp = true,
   canAddResources = true,
   canDeletePage,
   canDeleteResource,
@@ -200,6 +202,8 @@ export default function FigmaDashboardChrome({
   menuIcon,
 }: FigmaDashboardChromeProps) {
   const user = userProp ?? null;
+  const canAddPage = canAddPageProp && Boolean(onAddPage);
+  const showAddResources = Boolean(onFileUploads && onPaste);
   const [isPageMenuOpen, setIsPageMenuOpen] = useState(false);
   const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -264,7 +268,7 @@ export default function FigmaDashboardChrome({
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
-    if (files.length > 0) onFileUploads(files);
+    if (files.length > 0) void onFileUploads?.(files);
     event.target.value = "";
     setIsUploadMenuOpen(false);
   };
@@ -274,7 +278,7 @@ export default function FigmaDashboardChrome({
 
     setIsAddingPage(true);
     try {
-      await onAddPage();
+      await onAddPage?.();
     } finally {
       setIsAddingPage(false);
     }
@@ -356,7 +360,7 @@ export default function FigmaDashboardChrome({
                             <span className={styles.categoryResourceName}>{label}</span>
                             <span className={styles.categoryResourceType}>{getResourceTypeLabel(resource)}</span>
                           </button>
-                          {(canDeleteResource?.(resource) ?? true) && (
+                          {onDeleteResource && (canDeleteResource?.(resource) ?? true) && (
                             <button
                               type="button"
                               className={styles.deleteResourceButton}
@@ -454,7 +458,7 @@ export default function FigmaDashboardChrome({
       </div>
 
       <div className={styles.topActions}>
-        <div className={styles.actionMenu} ref={uploadMenuRef}>
+        {showAddResources && <div className={styles.actionMenu} ref={uploadMenuRef}>
           <button
             type="button"
             className={styles.topIconButton}
@@ -477,7 +481,7 @@ export default function FigmaDashboardChrome({
                 type="button"
                 className={styles.actionPopoverButton}
                 onClick={() => {
-                  void onPaste();
+                  void onPaste?.();
                   setIsUploadMenuOpen(false);
                 }}
               >
@@ -490,7 +494,7 @@ export default function FigmaDashboardChrome({
               )}
             </div>
           )}
-        </div>
+        </div>}
 
         <div className={styles.actionMenu} ref={profileMenuRef}>
           <button
