@@ -8,7 +8,7 @@
     "start": "bun --env-file=../.env.local --bun next start -p 5173",
     "lint": "eslint",
     "dev:vinext": "vite dev --port 3001",
-    "build:vinext": "vite build",
+    "build:vinext": "vite build && node scripts/strip-static-immutable-header.mjs",
     "start:vinext": "wrangler dev --config dist/server/wrangler.json",
     "deploy:vinext": "vinext-cloudflare deploy --config dist/server/wrangler.json"
   },
