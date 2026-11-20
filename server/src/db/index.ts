@@ -9,6 +9,8 @@ const useEmbeddedDevelopmentDatabase =
 
 const developmentDatabasePath = new URL('../../../.saveswitch-dev-db/', import.meta.url).pathname;
 
+let postgresClient: ReturnType<typeof postgres> | null = null;
+
 const createDatabase = () => {
   if (useEmbeddedDevelopmentDatabase) {
     return drizzlePglite({
@@ -24,7 +26,11 @@ const createDatabase = () => {
   const sql = postgres(process.env.DATABASE_URL, {
     ssl: process.env.DATABASE_URL.includes('localhost') ? false : 'require',
   });
+  postgresClient = sql;
   return drizzlePostgres(sql, { schema });
 };
 
 export const db = createDatabase() as ReturnType<typeof drizzlePostgres<typeof schema>>;
+
+/** Raw postgres-js client for maintenance jobs that need a reserved session (null in PGlite dev mode). */
+export const getPostgresMaintenanceClient = () => postgresClient;

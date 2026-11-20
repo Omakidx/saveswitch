@@ -1,6 +1,10 @@
 import { and, isNotNull, lt, or } from 'drizzle-orm'
 import { pages } from './db/schema'
 
+/** Lifetime of a Xoomshare room, shared by the API sweep and the cleanup cron. */
+export const XOOMSHARE_TTL_HOURS = 3
+export const XOOMSHARE_TTL_MS = XOOMSHARE_TTL_HOURS * 60 * 60 * 1000
+
 export type XoomsharePageTiming = {
   sessionId: string | null
   expiresAt: Date | null

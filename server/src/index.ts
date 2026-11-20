@@ -49,7 +49,7 @@ import {
   XOOMSHARE_MAX_RESOURCES,
   XOOMSHARE_MAX_TITLE_BYTES,
 } from './xoomshare-security'
-import { getEffectiveXoomshareExpiresAt as computeEffectiveExpiry, getExpiredXoomshareRoomCondition } from './xoomshare-expiry'
+import { getEffectiveXoomshareExpiresAt as computeEffectiveExpiry, getExpiredXoomshareRoomCondition, XOOMSHARE_TTL_HOURS, XOOMSHARE_TTL_MS } from './xoomshare-expiry'
 
 // ── Types for Google API responses ──
 interface GoogleTokenResponse {
@@ -175,8 +175,6 @@ const DEV_USER = {
   picture: '',
   visibility: 'public' as const,
 }
-const XOOMSHARE_TTL_HOURS = 3
-const XOOMSHARE_TTL_MS = XOOMSHARE_TTL_HOURS * 60 * 60 * 1000
 const XOOMSHARE_CLEANUP_INTERVAL_MS = 60 * 1000
 const XOOMSHARE_COOKIE_SECURE = !isLocalDevelopmentOrigin
 const MAX_XOOMSHARE_TEXT_LENGTH = 100_000
