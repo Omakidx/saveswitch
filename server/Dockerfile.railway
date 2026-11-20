@@ -1,5 +1,5 @@
 # Railway image: the API plus a Cloudflare tunnel (see railway-start.ts).
-# Requires the TUNNEL_TOKEN service variable. The Heroku image stays in Dockerfile.
+# Requires the TUNNEL_TOKEN service variable. Dockerfile (no tunnel) is used by the cleanup cron.
 FROM oven/bun:1.3.14 AS runtime
 
 ARG CLOUDFLARED_VERSION=2026.9.1

@@ -13,7 +13,7 @@ trap 'rm -rf "$staging"' EXIT
 
 tar -C "$server_dir" \
   --exclude=./node_modules --exclude=./railway.json --exclude=./Dockerfile.railway \
-  --exclude=./railway-start.ts --exclude=./heroku.yml -cf - . | tar -C "$staging" -xf -
+  --exclude=./railway-start.ts -cf - . | tar -C "$staging" -xf -
 
 cd "$server_dir/.."  # the Railway project is linked at the repo root
 railway up "$staging" --path-as-root --service saveswitch-cleanup --ci "$@"

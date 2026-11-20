@@ -1,7 +1,7 @@
 /**
  * Resolves the address used for rate limiting.
  *
- * Behind a reverse proxy (Railway, Heroku, ...) the socket peer is the proxy, so
+ * Behind a reverse proxy (Railway, Cloudflare, ...) the socket peer is the proxy, so
  * every visitor would share one rate-limit bucket. When `trustedProxyHops` > 0
  * the Nth entry from the RIGHT of X-Forwarded-For is used: that entry was
  * appended by our own trusted proxy, whereas entries further left are
