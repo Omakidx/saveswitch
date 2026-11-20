@@ -8,12 +8,18 @@ export type RateLimitDecision = {
 /** A bounded, per-process fixed-window limiter keyed by a server-observed IP. */
 export class FixedWindowRateLimiter {
   private readonly entries = new Map<string, { count: number; resetAt: number }>()
+  private lastSweepAt = Number.NEGATIVE_INFINITY
 
   constructor(private readonly maxEntries = DEFAULT_MAX_ENTRIES) {}
 
   consume(key: string, limit: number, windowMs: number, now = Date.now()): RateLimitDecision {
-    for (const [entryKey, entry] of this.entries) {
-      if (entry.resetAt <= now) this.entries.delete(entryKey)
+    // Sweeping every entry on every request is O(n) per call; once a second is
+    // enough because expired entries are also replaced lazily below.
+    if (now - this.lastSweepAt >= 1_000 || this.entries.size >= this.maxEntries) {
+      this.lastSweepAt = now
+      for (const [entryKey, entry] of this.entries) {
+        if (entry.resetAt <= now) this.entries.delete(entryKey)
+      }
     }
     while (this.entries.size >= this.maxEntries && !this.entries.has(key)) {
       const oldest = this.entries.keys().next().value

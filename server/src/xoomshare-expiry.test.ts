@@ -21,3 +21,18 @@ describe('Xoomshare expiry cleanup query', () => {
     expect(query.sql).toContain('"created_at" < $2')
   })
 })
+
+import { getEffectiveXoomshareExpiresAt } from './xoomshare-expiry'
+
+describe('getEffectiveXoomshareExpiresAt', () => {
+  const ttl = 3 * 60 * 60 * 1000
+  const createdAt = new Date('2026-01-01T00:00:00Z')
+
+  test('caps a stored expiry at createdAt + ttl and ignores non-room pages without expiry', () => {
+    const far = new Date(createdAt.getTime() + 10 * ttl)
+    expect(getEffectiveXoomshareExpiresAt({ sessionId: 's', expiresAt: far, createdAt }, ttl)?.getTime()).toBe(createdAt.getTime() + ttl)
+    const soon = new Date(createdAt.getTime() + 1000)
+    expect(getEffectiveXoomshareExpiresAt({ sessionId: 's', expiresAt: soon, createdAt }, ttl)).toBe(soon)
+    expect(getEffectiveXoomshareExpiresAt({ sessionId: null, expiresAt: null, createdAt }, ttl)).toBeNull()
+  })
+})

@@ -34,7 +34,10 @@ const parseAbsoluteUrl = (value: string, key: string) => {
 export const resolveRuntimeConfig = (
   env: Record<string, string | undefined> = process.env,
 ): RuntimeConfig => {
+  // Fail closed: a Railway deployment is production even if NODE_ENV was never set,
+  // so the development JWT fallback can never apply there.
   const isProduction = env.NODE_ENV === 'production'
+    || (!!env.RAILWAY_ENVIRONMENT?.trim() && env.SAVESWITCH_DEV_MODE !== 'true')
   const clientOrigin = (env.CLIENT_ORIGIN || DEFAULT_CLIENT_ORIGIN).trim()
   const googleRedirectUri = (env.GOOGLE_REDIRECT_URI || DEFAULT_GOOGLE_REDIRECT_URI).trim()
   const config: RuntimeConfig = {

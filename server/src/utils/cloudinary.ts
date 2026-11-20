@@ -117,24 +117,25 @@ export async function uploadImage(base64Image: string): Promise<string> {
 
     return result.secure_url
   } catch (error) {
-    if (
-      error instanceof CloudinaryConfigurationError ||
-      error instanceof ImageValidationError
-    ) {
+    if (error instanceof ImageValidationError) {
       throw error
+    }
+
+    // Operator-facing detail (env var names, permissions) is logged only; the
+    // error surfaced to API clients stays generic.
+    if (error instanceof CloudinaryConfigurationError) {
+      console.error('Cloudinary configuration error:', error.message)
+      throw new CloudinaryConfigurationError('Uploads are not configured correctly.')
     }
 
     if (isCloudinaryConfigurationRejection(error)) {
       const maybeError = error as { http_code?: number }
-      if (maybeError.http_code === 403) {
-        throw new CloudinaryConfigurationError(
-          'Cloudinary credentials do not have upload/create permission. Update CLOUDINARY_URL with an API key that can create image assets.'
-        )
-      }
-
-      throw new CloudinaryConfigurationError(
-        'Cloudinary credentials were rejected. Check CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET in .env.local.'
+      console.error(
+        maybeError.http_code === 403
+          ? 'Cloudinary credentials lack upload/create permission. Update CLOUDINARY_URL with a key that can create image assets.'
+          : 'Cloudinary credentials were rejected. Check CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET.',
       )
+      throw new CloudinaryConfigurationError('Uploads are not configured correctly.')
     }
 
     console.error('Cloudinary upload error:', error)
@@ -285,11 +286,13 @@ export async function uploadResourceAsset(
     }
   } catch (error) {
     if (error instanceof CloudinaryConfigurationError) {
-      throw error
+      console.error('Cloudinary configuration error:', error.message)
+      throw new CloudinaryConfigurationError('Uploads are not configured correctly.')
     }
 
     if (isCloudinaryConfigurationRejection(error)) {
-      throw new CloudinaryConfigurationError('Cloudinary credentials were rejected. Check the configured upload credentials.')
+      console.error('Cloudinary credentials were rejected. Check the configured upload credentials.')
+      throw new CloudinaryConfigurationError('Uploads are not configured correctly.')
     }
 
     console.error('Cloudinary resource upload error:', error)

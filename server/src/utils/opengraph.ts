@@ -46,6 +46,13 @@ function publicV6(address: string): boolean {
   const ip = expandV6(address); if (!ip) return false; const first = ip[0]!;
   if (ip.every((x) => x === 0) || (ip.slice(0, 7).every((x) => x === 0) && ip[7] === 1)) return false;
   if (ip.slice(0, 5).every((x) => x === 0) && ip[5] === 0xffff) return publicV4(`${ip[6]! >> 8}.${ip[6]! & 255}.${ip[7]! >> 8}.${ip[7]! & 255}`);
+  const embeddedV4 = `${ip[6]! >> 8}.${ip[6]! & 255}.${ip[7]! >> 8}.${ip[7]! & 255}`;
+  // IPv4-compatible (::a.b.c.d, deprecated), 6to4 (2002::/16), Teredo (2001::/32) and discard-only 100::/64 are never legitimate public web hosts.
+  if (ip.slice(0, 6).every((x) => x === 0)) return false;
+  if (first === 0x2002 || (first === 0x2001 && ip[1] === 0) || (first === 0x100 && ip.slice(1, 4).every((x) => x === 0))) return false;
+  // NAT64: well-known prefix embeds a v4 address that must itself be public; the local-use /48 is blocked outright.
+  if (first === 0x64 && ip[1] === 0xff9b) return ip.slice(2, 6).every((x) => x === 0) && publicV4(embeddedV4);
+  if ((first & 0xffc0) === 0xfec0) return false;
   return (first & 0xfe00) !== 0xfc00 && (first & 0xffc0) !== 0xfe80 && (first & 0xff00) !== 0xff00 && !(first === 0x2001 && ip[1] === 0x0db8);
 }
 const publicIp = (ip: string) => ip.includes(':') ? publicV6(ip) : publicV4(ip);

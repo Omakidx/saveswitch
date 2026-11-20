@@ -13,7 +13,7 @@ describe('fetchOpenGraphData SSRF boundary', () => {
     await expect(fetchOpenGraphData('https://public.example/page', dependencies)).resolves.toEqual({ title: 'Allowed', description: null, thumbnailUrl: null });
   });
 
-  test.each(['http://127.0.0.1/', 'http://127.1/', 'http://2130706433/', 'http://[::1]/', 'http://[::ffff:127.0.0.1]/', 'http://192.168.1.10/', 'http://[fc00::1]/', 'http://[fe80::1]/'])('rejects unsafe literal destination %s before fetching', async (url) => {
+  test.each(['http://127.0.0.1/', 'http://127.1/', 'http://2130706433/', 'http://[::1]/', 'http://[::ffff:127.0.0.1]/', 'http://192.168.1.10/', 'http://[fc00::1]/', 'http://[fe80::1]/', 'http://[::127.0.0.1]/', 'http://[::7f00:1]/', 'http://[64:ff9b::127.0.0.1]/', 'http://[64:ff9b::a00:1]/', 'http://[64:ff9b:1::1]/', 'http://[2002:7f00:1::1]/', 'http://[2001::1]/', 'http://[fec0::1]/', 'http://[100::1]/'])('rejects unsafe literal destination %s before fetching', async (url) => {
     let called = false;
     const result = await fetchOpenGraphData(url, { resolveHostname: async () => ['127.0.0.1'], fetch: async () => { called = true; return htmlResponse(); } });
     expect(result).toEqual({ title: null, description: null, thumbnailUrl: null });

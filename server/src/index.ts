@@ -3,7 +3,7 @@ import { cors } from '@elysiajs/cors'
 import { jwt } from '@elysiajs/jwt'
 import { db } from './db'
 import { assetDeletionQueue, users, pages, resources } from './db/schema'
-import { eq, and, inArray, isNotNull, lt, sql } from 'drizzle-orm'
+import { eq, and, asc, inArray, isNotNull, sql } from 'drizzle-orm'
 import {
   CloudinaryConfigurationError,
   ImageUploadError,
@@ -20,7 +20,10 @@ import {
 } from './utils/cloudinary'
 import { fetchOpenGraphData } from './utils/opengraph'
 import { AUTH_TOKEN_MAX_AGE_SECONDS, createAuthTokenClaims } from './auth-token'
-import { isUuid } from './request-validation'
+import { RESERVED_ROUTE_SEGMENTS, asRecord, isSafeCssColor, isUniqueViolation, isUuid } from './request-validation'
+import { resolveClientAddress, resolveTrustedProxyHops } from './client-address'
+import { createAssetDeletionDrainer } from './asset-deletion-drain'
+import { publicPageTopic, resolveSubscriptionTopic, xoomshareRoomTopic } from './realtime-topics'
 import { resolveRuntimeConfig } from './runtime-config'
 import {
   canCreateXoomshareResource,
@@ -46,7 +49,7 @@ import {
   XOOMSHARE_MAX_RESOURCES,
   XOOMSHARE_MAX_TITLE_BYTES,
 } from './xoomshare-security'
-import { getExpiredXoomshareRoomCondition } from './xoomshare-expiry'
+import { getEffectiveXoomshareExpiresAt as computeEffectiveExpiry, getExpiredXoomshareRoomCondition } from './xoomshare-expiry'
 
 // ── Types for Google API responses ──
 interface GoogleTokenResponse {
@@ -108,6 +111,14 @@ const normalizeResourceCoordinate = (value: unknown, fallback: number) => {
   return coordinate
 }
 
+/** Position updates must carry both coordinates; a partial body must not teleport a card. */
+const requireResourceCoordinate = (value: unknown) => {
+  if (value === undefined || value === null || value === '') {
+    throw new ResourceValidationError('Resource position is required')
+  }
+  return normalizeResourceCoordinate(value, 0)
+}
+
 const getRequiredString = (value: unknown, fieldName: string) => {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new ResourceValidationError(`${fieldName} is required`)
@@ -152,6 +163,10 @@ const DEV_MODE =
   process.env.SAVESWITCH_DEV_MODE === 'true' &&
   isLocalDevelopmentOrigin
 const MAX_REQUEST_BODY_BYTES = 15 * 1024 * 1024
+const GOOGLE_REQUEST_TIMEOUT_MS = 10_000
+const MAX_LINK_LENGTH = 8_192
+const MAX_USER_PAGE_NAME_LENGTH = 255
+const MAX_USER_TITLE_LENGTH = 512
 const DEV_USER = {
   id: 'saveswitch-dev-user',
   email: 'dev@saveswitch.local',
@@ -165,29 +180,14 @@ const XOOMSHARE_TTL_MS = XOOMSHARE_TTL_HOURS * 60 * 60 * 1000
 const XOOMSHARE_CLEANUP_INTERVAL_MS = 60 * 1000
 const XOOMSHARE_COOKIE_SECURE = !isLocalDevelopmentOrigin
 const MAX_XOOMSHARE_TEXT_LENGTH = 100_000
-const RESERVED_PATH_CODES = new Set([
-  'api',
-  'auth',
-  'dashboard',
-  'link',
-  'login',
-  'public',
-  'register',
-  'xoomshare',
-])
+const RESERVED_PATH_CODES = RESERVED_ROUTE_SEGMENTS
 
 type XoomshareCreateBody = {
   pathCode?: unknown
 }
 
-const getEffectiveXoomshareExpiresAt = (page: typeof pages.$inferSelect) => {
-  if (!page.sessionId && !page.expiresAt) return null
-
-  const ttlExpiry = new Date(page.createdAt.getTime() + XOOMSHARE_TTL_MS)
-  if (!page.expiresAt) return ttlExpiry
-
-  return page.expiresAt.getTime() <= ttlExpiry.getTime() ? page.expiresAt : ttlExpiry
-}
+const getEffectiveXoomshareExpiresAt = (page: typeof pages.$inferSelect) =>
+  computeEffectiveExpiry(page, XOOMSHARE_TTL_MS)
 
 const formatPage = (page: typeof pages.$inferSelect) => {
   const {
@@ -295,10 +295,17 @@ const XOOMSHARE_RATE_LIMITS = {
   websocket: { limit: 30, windowMs: 60 * 1000 },
 } as const
 
+const TRUSTED_PROXY_HOPS = resolveTrustedProxyHops()
+
 const getXoomshareRequestAddress = (request: Request) => {
-  // requestIP reads Bun's accepted socket address. Do not use X-Forwarded-For
-  // or client supplied identifiers here unless a trusted proxy boundary is set.
-  return app.server?.requestIP(request)?.address ?? 'unknown'
+  // requestIP reads Bun's accepted socket address. X-Forwarded-For is only
+  // honoured for the configured number of trusted proxy hops (counted from the
+  // right); otherwise every visitor behind a proxy would share one bucket.
+  return resolveClientAddress({
+    forwardedFor: request.headers.get('x-forwarded-for'),
+    socketAddress: app.server?.requestIP(request)?.address,
+    trustedProxyHops: TRUSTED_PROXY_HOPS,
+  })
 }
 
 const enforceXoomshareRateLimit = (
@@ -347,9 +354,10 @@ const lockXoomshareRoom = async (
   return room as typeof pages.$inferSelect | undefined
 }
 
-const publishXoomshareUpdate = (roomId: string, event: Record<string, unknown>) => {
+const publishXoomshareUpdate = (sessionId: string | null, event: Record<string, unknown>) => {
+  if (!sessionId) return
   try {
-    app.server?.publish(`page_${roomId}`, JSON.stringify(event))
+    app.server?.publish(xoomshareRoomTopic(sessionId), JSON.stringify(event))
   } catch (error) {
     // Do not let a post-commit websocket failure cause a caller to believe
     // that a persisted mutation failed (or trigger quota compensation).
@@ -367,6 +375,15 @@ const enqueueRemoteAssetDeletions = async (tx: any, assets: Array<{
       providerPublicId: asset.providerPublicId,
       providerResourceType: asset.providerResourceType,
     }).onConflictDoNothing()
+  }
+}
+
+/** Workspace page updates are best-effort realtime hints; never fail a committed write. */
+const publishPageUpdate = (pageId: string) => {
+  try {
+    app.server?.publish(publicPageTopic(pageId), JSON.stringify({ type: 'resource_updated' }))
+  } catch (error) {
+    console.error('Publish page update failed:', error)
   }
 }
 
@@ -391,30 +408,34 @@ const queueFailedUncommittedAssetCleanup = async (asset: UploadedResourceAsset |
   }
 }
 
-/** Cloudinary destroy is idempotent; a duplicate worker can safely retry it. */
-const drainAssetDeletionQueue = async (limit = 25) => {
-  const pending = await db.select().from(assetDeletionQueue).limit(limit)
-  for (const item of pending) {
-    const removed = await destroyUploadedResourceAsset({
-      url: '',
-      publicId: item.providerPublicId,
-      resourceType: item.providerResourceType,
-    })
-    const outcome = getAssetDeletionQueueOutcome(removed)
-    if (outcome.remove) {
-      await db.delete(assetDeletionQueue).where(and(
-        eq(assetDeletionQueue.id, item.id),
-        eq(assetDeletionQueue.providerPublicId, item.providerPublicId),
-      ))
-    } else if (outcome.incrementAttempts) {
-      await db.update(assetDeletionQueue).set({
-        attempts: sql`${assetDeletionQueue.attempts} + 1`,
-        lastError: 'Cloudinary destroy failed; retry scheduled',
-        updatedAt: new Date(),
-      }).where(eq(assetDeletionQueue.id, item.id))
-    }
-  }
-}
+/**
+ * Cloudinary destroy is idempotent; a duplicate worker can safely retry it.
+ * Never rejects (callers fire-and-forget it). Least-attempted, oldest items go
+ * first so a permanently failing asset cannot starve the rest of the queue.
+ */
+const drainAssetDeletionQueue = createAssetDeletionDrainer({
+  listPending: (limit) => db.select().from(assetDeletionQueue)
+    .orderBy(asc(assetDeletionQueue.attempts), asc(assetDeletionQueue.createdAt))
+    .limit(limit),
+  destroy: (item) => destroyUploadedResourceAsset({
+    url: '',
+    publicId: item.providerPublicId,
+    resourceType: item.providerResourceType,
+  }).then((removed) => getAssetDeletionQueueOutcome(removed).remove),
+  remove: async (item) => {
+    await db.delete(assetDeletionQueue).where(and(
+      eq(assetDeletionQueue.id, item.id),
+      eq(assetDeletionQueue.providerPublicId, item.providerPublicId),
+    ))
+  },
+  recordFailure: async (item) => {
+    await db.update(assetDeletionQueue).set({
+      attempts: sql`${assetDeletionQueue.attempts} + 1`,
+      lastError: 'Cloudinary destroy failed; retry scheduled',
+      updatedAt: new Date(),
+    }).where(eq(assetDeletionQueue.id, item.id))
+  },
+})
 
 const cleanupExpiredXoomshareRooms = async () => {
   try {
@@ -471,6 +492,14 @@ const app = new Elysia()
     })
   )
   .onRequest(({ request, set }) => {
+    // Defense in depth against cross-site writes: browsers always send Origin on
+    // cross-origin unsafe requests. Requests without Origin (server-to-server,
+    // curl) and safe methods (OAuth callback, downloads) are unaffected.
+    const origin = request.headers.get('origin')
+    if (origin && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && origin !== CLIENT_ORIGIN) {
+      set.status = 403
+      return { success: false, error: 'Origin is not allowed' }
+    }
     const contentLength = Number(request.headers.get('content-length'))
     if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
       set.status = 413
@@ -478,6 +507,8 @@ const app = new Elysia()
     }
   })
   .ws('/ws', {
+    // Clients only ever send tiny JSON control frames (subscribe/ping).
+    maxPayloadLength: 4 * 1024,
     beforeHandle({ request, set }) {
       if (!isAllowedXoomshareSocketOrigin(request)) {
         set.status = 403
@@ -488,34 +519,54 @@ const app = new Elysia()
       }
     },
     async message(ws, message: any) {
-      let msg = message;
-      if (typeof message === 'string') {
-        try { msg = JSON.parse(message); } catch {}
-      }
-      if (typeof msg === 'object' && msg !== null && msg.type === 'subscribe') {
+      try {
+        let msg = message;
+        if (typeof message === 'string') {
+          try { msg = JSON.parse(message); } catch { return }
+        }
+        if (typeof msg !== 'object' || msg === null || msg.type !== 'subscribe') return
         if (!isXoomsharePageId(msg.pageId)) return
         if (!xoomshareSocketQueryBudget.consume(ws as object, 8, 60 * 1000)) {
           ws.close(1008, 'Subscription query limit exceeded')
           return
         }
-        const [targetPage] = await db.select({ sessionId: pages.sessionId })
-          .from(pages)
-          .where(eq(pages.id, msg.pageId))
-          .limit(1)
-        if (!targetPage?.sessionId) return
 
-        const [room] = await db.select({ expiresAt: pages.expiresAt, createdAt: pages.createdAt, sessionId: pages.sessionId })
-          .from(pages)
-          .where(and(eq(pages.sessionId, targetPage.sessionId), isNotNull(pages.pathCode)))
-          .limit(1)
-        if (!room || isPageExpired(room as typeof pages.$inferSelect)) return
+        const [targetPage] = await db.select({
+          id: pages.id,
+          userId: pages.userId,
+          visibility: pages.visibility,
+          sessionId: pages.sessionId,
+          expiresAt: pages.expiresAt,
+          createdAt: pages.createdAt,
+        }).from(pages).where(eq(pages.id, msg.pageId)).limit(1)
+        if (!targetPage) return
+
+        const [roomRoot] = targetPage.sessionId
+          ? await db.select({
+            sessionId: pages.sessionId,
+            expiresAt: pages.expiresAt,
+            createdAt: pages.createdAt,
+          }).from(pages)
+            .where(and(eq(pages.sessionId, targetPage.sessionId), isNotNull(pages.pathCode)))
+            .limit(1)
+          : []
+
+        const topic = resolveSubscriptionTopic({
+          page: targetPage,
+          roomRoot,
+          ttlMs: XOOMSHARE_TTL_MS,
+        })
+        if (!topic) return
 
         const previousTopic = xoomshareSocketTopics.get(ws as object)
-        if (previousTopic && previousTopic !== `page_${msg.pageId}`) {
+        if (previousTopic && previousTopic !== topic) {
           ws.unsubscribe(previousTopic)
         }
-        ws.subscribe(`page_${msg.pageId}`)
-        xoomshareSocketTopics.set(ws as object, `page_${msg.pageId}`)
+        ws.subscribe(topic)
+        xoomshareSocketTopics.set(ws as object, topic)
+      } catch (error) {
+        // A failed lookup must not become an unhandled rejection in the socket loop.
+        console.error('WebSocket message handling failed:', error)
       }
     }
   })
@@ -583,7 +634,6 @@ const app = new Elysia()
       redirect_uri: GOOGLE_REDIRECT_URI,
       response_type: 'code',
       scope: 'openid email profile',
-      access_type: 'offline',
       state,
     })
     return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
@@ -591,7 +641,7 @@ const app = new Elysia()
 
   // ── Google OAuth: Callback ──
   .get('/auth/google/callback', async ({ query, jwt, cookie: { auth_token, oauth_state }, redirect }) => {
-    const { code } = query
+    const code = typeof query.code === 'string' ? query.code : ''
     const expectedState = oauth_state?.value as string | undefined
     oauth_state?.set({
       value: '',
@@ -613,9 +663,10 @@ const app = new Elysia()
     try {
       const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
+        signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-          code: code as string,
+          code,
           client_id: GOOGLE_CLIENT_ID,
           client_secret: GOOGLE_CLIENT_SECRET,
           redirect_uri: GOOGLE_REDIRECT_URI,
@@ -630,6 +681,7 @@ const app = new Elysia()
       const tokenData = (await tokenRes.json()) as GoogleTokenResponse
 
       const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
         headers: { Authorization: `Bearer ${tokenData.access_token}` },
       })
 
@@ -638,24 +690,40 @@ const app = new Elysia()
       }
 
       const userInfo = (await userInfoRes.json()) as GoogleUserInfo
+      if (
+        typeof userInfo.id !== 'string' || !userInfo.id ||
+        typeof userInfo.email !== 'string' || !userInfo.email ||
+        userInfo.verified_email === false
+      ) {
+        return redirect(`${CLIENT_ORIGIN}/login?error=userinfo_failed`)
+      }
 
-      // Upsert user into database
-      const existingUser = await db.select().from(users).where(eq(users.id, userInfo.id)).limit(1)
+      // Upsert user into database. Google may omit name/picture, but both
+      // columns are NOT NULL, so fall back instead of failing every sign-in.
+      const existingUser = await db.select({ id: users.id }).from(users).where(eq(users.id, userInfo.id)).limit(1)
       if (existingUser.length === 0) {
-        let uniqueUsername = generateRandomUsername()
-        // Try up to 5 times to ensure uniqueness (very unlikely to clash)
-        for (let i = 0; i < 5; i++) {
-          const clash = await db.select().from(users).where(eq(users.username, uniqueUsername)).limit(1)
-          if (clash.length === 0) break
-          uniqueUsername = generateRandomUsername()
+        const displayName = (typeof userInfo.name === 'string' && userInfo.name.trim()) || userInfo.email.split('@')[0]!
+        const picture = typeof userInfo.picture === 'string' ? userInfo.picture : ''
+        let created = false
+        for (let attempt = 0; attempt < 5 && !created; attempt++) {
+          try {
+            await db.insert(users).values({
+              id: userInfo.id,
+              email: userInfo.email,
+              name: displayName,
+              picture,
+              username: generateRandomUsername(),
+            })
+            created = true
+          } catch (insertError) {
+            if (!isUniqueViolation(insertError)) throw insertError
+            // A concurrent callback for the same account may have created the
+            // row (fine), otherwise the random username collided: retry.
+            const [raced] = await db.select({ id: users.id }).from(users).where(eq(users.id, userInfo.id)).limit(1)
+            if (raced) created = true
+          }
         }
-        await db.insert(users).values({
-          id: userInfo.id,
-          email: userInfo.email,
-          name: userInfo.name,
-          picture: userInfo.picture,
-          username: uniqueUsername,
-        })
+        if (!created) throw new Error('Unable to allocate a unique username')
       }
 
       const token = await jwt.sign(createAuthTokenClaims({ sub: userInfo.id, email: userInfo.email }))
@@ -678,29 +746,37 @@ const app = new Elysia()
 
 
   // ── Auth: Get current user ──
-  .get('/auth/me', async ({ jwt, cookie: { auth_token } }) => {
+  .get('/auth/me', async ({ jwt, set, cookie: { auth_token } }) => {
     const token = auth_token?.value as string | undefined
     if (!token) {
       return { authenticated: false }
     }
 
+    let payload: Awaited<ReturnType<typeof jwt.verify>>
     try {
-      const payload = await jwt.verify(token)
-      if (!payload) {
-        return { authenticated: false }
-      }
-      
-      const user = await db.select().from(users).where(eq(users.id, payload.sub as string)).limit(1)
+      payload = await jwt.verify(token)
+    } catch {
+      return { authenticated: false }
+    }
+    if (!payload || typeof payload.sub !== 'string') {
+      return { authenticated: false }
+    }
+
+    try {
+      const user = await db.select().from(users).where(eq(users.id, payload.sub)).limit(1)
       if (user.length === 0) {
-         return { authenticated: false }
+        return { authenticated: false }
       }
 
       return {
         authenticated: true,
         user: user[0],
       }
-    } catch {
-      return { authenticated: false }
+    } catch (err) {
+      // A database failure is not a signed-out user; let the client show a retry.
+      console.error('Failed to load current user:', err)
+      set.status = 500
+      return { authenticated: false, error: 'Could not load your session' }
     }
   })
 
@@ -715,13 +791,19 @@ const app = new Elysia()
   })
 
   // ── Auth: Check username availability ──
-  .get('/users/check-username', async ({ query, jwt, cookie: { auth_token } }) => {
+  .get('/users/check-username', async ({ query, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
-    if (!token) return { available: false, error: 'unauthorized' }
+    if (!token) {
+      set.status = 401
+      return { available: false, error: 'unauthorized' }
+    }
 
     try {
       const payload = await jwt.verify(token)
-      if (!payload) return { available: false, error: 'invalid token' }
+      if (!payload) {
+        set.status = 401
+        return { available: false, error: 'invalid token' }
+      }
 
       const { username } = query as { username?: string }
       if (!username || typeof username !== 'string') {
@@ -737,13 +819,19 @@ const app = new Elysia()
         return { available: false, error: 'lowercase letters, numbers, underscores only' }
       }
 
+      if (RESERVED_ROUTE_SEGMENTS.has(cleanUsername)) {
+        return { available: false, error: 'reserved' }
+      }
+
       const clash = await db.select().from(users).where(eq(users.username, cleanUsername)).limit(1)
       if (clash.length > 0 && clash[0]!.id !== payload.sub) {
         return { available: false, error: 'already taken' }
       }
 
       return { available: true }
-    } catch {
+    } catch (error) {
+      console.error('Username availability check failed:', error)
+      set.status = 500
       return { available: false, error: 'server error' }
     }
   })
@@ -763,18 +851,23 @@ const app = new Elysia()
         return { success: false, error: 'invalid token' }
       }
 
-      if (!body || typeof body !== 'object') {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
         set.status = 400
         return { success: false, error: 'Request body is required' }
       }
 
       const { name, picture, username } = body as UserProfileUpdateBody
-      
+
       const updateData: Partial<typeof users.$inferInsert> = {}
       if (name !== undefined) {
         if (typeof name !== 'string' || name.trim().length === 0) {
           set.status = 400
           return { success: false, error: 'Display name is required' }
+        }
+
+        if (name.trim().length > 120) {
+          set.status = 400
+          return { success: false, error: 'Display name must be 120 characters or fewer' }
         }
 
         updateData.name = name.trim()
@@ -790,6 +883,11 @@ const app = new Elysia()
         if (!/^[a-z0-9_]+$/.test(cleanUsername)) {
           set.status = 400
           return { success: false, error: 'Username can only contain lowercase letters, numbers, and underscores' }
+        }
+
+        if (RESERVED_ROUTE_SEGMENTS.has(cleanUsername)) {
+          set.status = 400
+          return { success: false, error: 'That username is reserved' }
         }
 
         // Check uniqueness
@@ -830,6 +928,12 @@ const app = new Elysia()
     } catch (e: unknown) {
       console.error(e)
 
+      // The pre-check above is racy: the unique index is the real arbiter.
+      if (isUniqueViolation(e)) {
+        set.status = 400
+        return { success: false, error: 'Username is already taken' }
+      }
+
       if (e instanceof ImageValidationError) {
         set.status = 400
         return { success: false, error: e.message }
@@ -837,44 +941,55 @@ const app = new Elysia()
 
       if (e instanceof CloudinaryConfigurationError) {
         set.status = 500
-        return { success: false, error: e.message }
+        return { success: false, error: 'Uploads are not configured correctly.' }
       }
 
       if (e instanceof ImageUploadError) {
         set.status = 502
-        return { success: false, error: e.message }
+        return { success: false, error: 'Upload failed. Please try again.' }
       }
 
+      // Never echo internal error text (driver/SQL details) to the client.
       set.status = 500
-      return { success: false, error: e instanceof Error ? e.message : 'server error' }
+      return { success: false, error: 'server error' }
     }
   })
 
   // ── PATCH /users/me/visibility — Toggle private/public space ──
-  .patch('/users/me/visibility', async ({ body, jwt, cookie: { auth_token } }) => {
+  .patch('/users/me/visibility', async ({ body, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
-    if (!token) return { success: false, error: 'unauthorized' }
+    if (!token) {
+      set.status = 401
+      return { success: false, error: 'unauthorized' }
+    }
 
     try {
       const payload = await jwt.verify(token)
-      if (!payload) return { success: false, error: 'invalid token' }
+      if (!payload) {
+        set.status = 401
+        return { success: false, error: 'invalid token' }
+      }
 
-      const { visibility } = body as { visibility: string }
-      if (!visibility || !['private', 'public'].includes(visibility)) {
+      const { visibility } = asRecord(body)
+      if (visibility !== 'private' && visibility !== 'public') {
+        set.status = 400
         return { success: false, error: 'visibility must be "private" or "public"' }
       }
 
       const updatedUser = await db.update(users)
-        .set({ visibility: visibility as 'private' | 'public' })
+        .set({ visibility })
         .where(eq(users.id, payload.sub as string))
         .returning()
 
       if (updatedUser.length === 0) {
+        set.status = 404
         return { success: false, error: 'User not found' }
       }
 
       return { success: true, visibility: updatedUser[0]!.visibility }
-    } catch {
+    } catch (error) {
+      console.error('Update visibility failed:', error)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -889,32 +1004,39 @@ const app = new Elysia()
       if (!enforceXoomshareRateLimit(request, set, 'create')) {
         return { success: false, error: 'Too many room creation attempts. Please try again later.' }
       }
+      const requestedPathCode = asRecord(body).pathCode
       let pathCode = normalizeXoomsharePathCode({
-        value: (body as XoomshareCreateBody | undefined)?.pathCode,
+        value: requestedPathCode,
         reservedPathCodes: RESERVED_PATH_CODES,
       })
-
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const existing = await db.select().from(pages).where(eq(pages.pathCode, pathCode)).limit(1)
-        if (existing.length === 0) break
-        if ((body as XoomshareCreateBody | undefined)?.pathCode) {
-          set.status = 409
-          return { success: false, error: 'That secret page code is already in use' }
-        }
-        pathCode = generateXoomsharePathCode()
-      }
+      const isCustomPathCode = typeof requestedPathCode === 'string' && requestedPathCode !== ''
 
       const sessionId = crypto.randomUUID()
       const expiresAt = new Date(Date.now() + XOOMSHARE_TTL_HOURS * 60 * 60 * 1000)
-      const newPage = await db.insert(pages).values({
-        userId: null,
-        color: `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`,
-        name: `Xoomshare ${pathCode}`,
-        visibility: 'public',
-        pathCode,
-        sessionId,
-        expiresAt,
-      }).returning()
+      let newPage: Array<typeof pages.$inferSelect> = []
+      // The unique path_code index is the arbiter: a check-then-insert would
+      // let two concurrent creators race into a 500 instead of a clean 409.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          newPage = await db.insert(pages).values({
+            userId: null,
+            color: `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`,
+            name: `Xoomshare ${pathCode}`,
+            visibility: 'public',
+            pathCode,
+            sessionId,
+            expiresAt,
+          }).returning()
+          break
+        } catch (insertError) {
+          if (!isUniqueViolation(insertError)) throw insertError
+          if (isCustomPathCode) {
+            set.status = 409
+            return { success: false, error: 'That secret page code is already in use' }
+          }
+          pathCode = generateXoomsharePathCode()
+        }
+      }
 
       if (newPage.length === 0) {
         set.status = 500
@@ -1020,7 +1142,7 @@ const app = new Elysia()
         return { success: false, error: 'Only the creator can add pages' }
       }
 
-      const { name } = (body || {}) as { name?: unknown }
+      const { name } = asRecord(body)
       const requestedName = getBoundedXoomsharePageName(name)
       const vibrantColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 85%)`
       const created = await db.transaction(async (tx) => {
@@ -1044,7 +1166,7 @@ const app = new Elysia()
           allowGuestResources: lockedRoom.allowGuestResources,
         }).returning()
         if (!newPage) throw new Error('Xoomshare page insert failed')
-        return { roomId: lockedRoom.id, page: newPage }
+        return { roomId: lockedRoom.sessionId, page: newPage }
       })
 
       publishXoomshareUpdate(created.roomId, { type: 'page_added', pageId: created.page.id })
@@ -1084,7 +1206,7 @@ const app = new Elysia()
         return { success: false, error: 'Only the creator can rename pages' }
       }
 
-      const { name } = (body || {}) as { name?: unknown }
+      const { name } = asRecord(body)
       const nextName = getBoundedXoomsharePageName(name)
       if (!nextName) {
         set.status = 400
@@ -1105,7 +1227,7 @@ const app = new Elysia()
           .where(and(eq(pages.id, params.id), eq(pages.sessionId, lockedRoom.sessionId!)))
           .returning()
         if (!updatedPage) throw new XoomshareMutationError(404, 'Page not found in this room')
-        return { roomId: lockedRoom.id, page: updatedPage }
+        return { roomId: lockedRoom.sessionId, page: updatedPage }
       })
 
       publishXoomshareUpdate(updated.roomId, { type: 'page_updated', pageId: params.id })
@@ -1194,8 +1316,11 @@ const app = new Elysia()
             allowGuestResources: deletedPage.allowGuestResources,
             expiresAt: deletedPage.expiresAt,
             sessionId: deletedPage.sessionId,
-            resourceCount: sql`GREATEST(0, ${lockedRoom.resourceCount} - ${deletedResourceCount})`,
-            resourceBytes: sql`GREATEST(0, ${lockedRoom.resourceBytes} - ${deletedResourceBytes})`,
+            // Computed in JS: `GREATEST(0, $1 - $2)` has two untyped bind
+            // parameters, which Postgres rejects ("operator is not unique"),
+            // so deleting a room's root page always failed with a 500.
+            resourceCount: Math.max(0, lockedRoom.resourceCount - deletedResourceCount),
+            resourceBytes: Math.max(0, lockedRoom.resourceBytes - deletedResourceBytes),
           }).where(eq(pages.id, nextRoot.id))
         } else if (deletedResourceCount > 0) {
           await tx.update(pages).set({
@@ -1211,7 +1336,7 @@ const app = new Elysia()
         return { success: false, error: pageDeletion.error }
       }
 
-      publishXoomshareUpdate(room[0]!.id, { type: 'page_deleted', pageId: params.id })
+      publishXoomshareUpdate(room[0]!.sessionId, { type: 'page_deleted', pageId: params.id })
       void drainAssetDeletionQueue()
 
       return { success: true }
@@ -1241,7 +1366,7 @@ const app = new Elysia()
         return { success: false, error: 'Only the creator can change settings' }
       }
 
-      const { allowGuestResources } = body as { allowGuestResources?: boolean }
+      const { allowGuestResources } = asRecord(body)
       if (typeof allowGuestResources !== 'boolean') {
         set.status = 400
         return { success: false, error: 'allowGuestResources must be a boolean' }
@@ -1256,7 +1381,7 @@ const app = new Elysia()
         return lockedRoom
       })
 
-      publishXoomshareUpdate(updatedRoom.id, { type: 'settings_updated' })
+      publishXoomshareUpdate(updatedRoom.sessionId, { type: 'settings_updated' })
 
       return { success: true, allowGuestResources }
     } catch (e) {
@@ -1300,7 +1425,7 @@ const app = new Elysia()
         }).from(resources).where(inArray(resources.pageId, roomPages.map((page) => page.id)))
         await enqueueRemoteAssetDeletions(tx, assets)
         await tx.delete(pages).where(eq(pages.sessionId, lockedRoom.sessionId!))
-        return lockedRoom.id
+        return lockedRoom.sessionId
       })
 
       publishXoomshareUpdate(destroyedRoomId, { type: 'room_destroyed' })
@@ -1343,8 +1468,7 @@ const app = new Elysia()
         participant = ensureXoomshareRequestParticipant({ request, set, room: room[0]! })
       }
 
-      const requestBody = body as { type?: unknown; content?: unknown; title?: unknown; x?: unknown; y?: unknown; pageId?: unknown }
-      const { type, content, title, x, y, pageId } = requestBody
+      const { type, content, title, x, y, pageId } = asRecord(body)
 
       if (!isResourceType(type)) {
         throw new ResourceValidationError('Resource type is not supported')
@@ -1353,6 +1477,9 @@ const app = new Elysia()
       const requestContent = getRequiredString(content, 'Resource content')
       if (type === 'text' && requestContent.length > MAX_XOOMSHARE_TEXT_LENGTH) {
         throw new ResourceValidationError(`Text resources must be ${MAX_XOOMSHARE_TEXT_LENGTH} characters or fewer`)
+      }
+      if (type === 'link' && requestContent.length > MAX_LINK_LENGTH) {
+        throw new ResourceValidationError(`Links must be ${MAX_LINK_LENGTH} characters or fewer`)
       }
       const requestTitle = getBoundedXoomshareOptionalString(title, 'Resource title', XOOMSHARE_MAX_TITLE_BYTES)
       const resourceX = normalizeResourceCoordinate(x, randomResourceCoordinate())
@@ -1482,7 +1609,7 @@ const app = new Elysia()
           providerResourceType: uploadedAsset?.publicId ? uploadedAsset.resourceType : null,
         }).returning()
         if (!newResource) throw new Error('Xoomshare resource insert failed')
-        return { roomId: lockedRoom.id, resource: newResource }
+        return { roomId: lockedRoom.sessionId, resource: newResource }
       })
 
       // The database transaction committed the URL and quota atomically.
@@ -1564,7 +1691,7 @@ const app = new Elysia()
         return { success: false, error: 'Xoomshare page not found or expired' }
       }
       const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
-      const requestBody = body as { content?: unknown; title?: unknown }
+      const requestBody = asRecord(body)
       const content = getRequiredString(requestBody.content, 'Resource content')
       if (content.length > MAX_XOOMSHARE_TEXT_LENGTH) {
         throw new ResourceValidationError(`Text resources must be ${MAX_XOOMSHARE_TEXT_LENGTH} characters or fewer`)
@@ -1630,7 +1757,7 @@ const app = new Elysia()
             .set({ resourceBytes: sql`GREATEST(0, ${pages.resourceBytes} - ${-byteDelta})` })
             .where(eq(pages.id, lockedRoom.id))
         }
-        return { roomId: lockedRoom.id, resource: updatedResource }
+        return { roomId: lockedRoom.sessionId, resource: updatedResource }
       })
 
       publishXoomshareUpdate(updated.roomId, { type: 'resource_updated' })
@@ -1675,9 +1802,9 @@ const app = new Elysia()
 
       const participant = resolveXoomshareRequestParticipant({ request, set, room: room[0]! })
 
-      const { x, y } = body as { x?: unknown; y?: unknown }
-      const resourceX = normalizeResourceCoordinate(x, 100)
-      const resourceY = normalizeResourceCoordinate(y, 100)
+      const { x, y } = asRecord(body)
+      const resourceX = requireResourceCoordinate(x)
+      const resourceY = requireResourceCoordinate(y)
       const moved = await db.transaction(async (tx) => {
         const lockedRoom = await lockXoomshareRoom(tx, params.pathCode, room[0]!)
         if (!lockedRoom || isPageExpired(lockedRoom)) {
@@ -1702,7 +1829,7 @@ const app = new Elysia()
           .where(eq(resources.id, params.id))
           .returning()
         if (!updatedResource) throw new XoomshareMutationError(409, 'Resource changed before it could be moved')
-        return { roomId: lockedRoom.id, resource: updatedResource }
+        return { roomId: lockedRoom.sessionId, resource: updatedResource }
       })
 
       publishXoomshareUpdate(moved.roomId, { type: 'resource_updated' })
@@ -1781,7 +1908,7 @@ const app = new Elysia()
             resourceBytes: sql`GREATEST(0, ${pages.resourceBytes} - ${deletedResource.sizeBytes})`,
           })
           .where(eq(pages.id, lockedRoom.id))
-        return { roomId: lockedRoom.id }
+        return { roomId: lockedRoom.sessionId }
       })
 
       publishXoomshareUpdate(deleted.roomId, { type: 'resource_updated' })
@@ -1847,13 +1974,24 @@ const app = new Elysia()
         return { success: false, error: 'Please sign in again to create pages.' }
       }
 
-      const { color, name, visibility = 'private' } = body as { color: string; name: string; visibility?: string }
+      const { color, name: rawName, visibility = 'private' } = asRecord(body)
 
-      if (!color || !name) {
+      if (typeof color !== 'string' || typeof rawName !== 'string' || !color.trim() || !rawName.trim()) {
+        set.status = 400
         return { success: false, error: 'color and name are required' }
+      }
+      const name = rawName.trim()
+      if (name.length > MAX_USER_PAGE_NAME_LENGTH) {
+        set.status = 400
+        return { success: false, error: 'name is too long' }
+      }
+      if (!isSafeCssColor(color.trim())) {
+        set.status = 400
+        return { success: false, error: 'color must be a hex, rgb(), or hsl() value' }
       }
 
       if (visibility !== 'public' && visibility !== 'private') {
+        set.status = 400
         return { success: false, error: 'visibility must be public or private' }
       }
 
@@ -1865,29 +2003,32 @@ const app = new Elysia()
         and(
           eq(pages.userId, payload.sub as string),
           eq(pages.name, name),
-          eq(pages.visibility, visibility as 'public' | 'private')
+          eq(pages.visibility, visibility)
         )
       )
       
       const duplicate = existingPages.find(p => p.createdAt >= todayStart)
       if (duplicate) {
+        set.status = 409
         return { success: false, error: 'A page with this name already exists in this workspace today' }
       }
 
       const newPage = await db.insert(pages).values({
         userId: payload.sub as string,
-        color,
+        color: color.trim(),
         name,
-        visibility: visibility as 'private' | 'public',
+        visibility,
       }).returning()
 
       if (newPage.length === 0) {
+        set.status = 500
         return { success: false, error: 'Failed to create page' }
       }
 
       return { success: true, page: formatPage(newPage[0]!) }
     } catch (e) {
       console.error(e)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -1895,26 +2036,39 @@ const app = new Elysia()
   // ── PATCH /pages/:id — Update a page name ──
   .patch('/pages/:id', async ({ params, body, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
-    if (!token) return { success: false, error: 'unauthorized' }
+    if (!token) {
+      set.status = 401
+      return { success: false, error: 'unauthorized' }
+    }
 
     try {
       const payload = await jwt.verify(token)
-      if (!payload) return { success: false, error: 'invalid token' }
+      if (!payload) {
+        set.status = 401
+        return { success: false, error: 'invalid token' }
+      }
 
       const { id } = params
-      const { name } = body as { name: string }
       if (!isUuid(id)) {
         set.status = 400
         return { success: false, error: 'Page id is invalid.' }
       }
 
-
-      if (!name) {
+      const { name: rawName } = asRecord(body)
+      if (typeof rawName !== 'string' || !rawName.trim()) {
+        set.status = 400
         return { success: false, error: 'name is required' }
       }
+      const name = rawName.trim()
+      if (name.length > MAX_USER_PAGE_NAME_LENGTH) {
+        set.status = 400
+        return { success: false, error: 'name is too long' }
+      }
 
+      // Xoomshare room pages have no userId, so ownership also excludes them.
       const pageToUpdate = await db.select().from(pages).where(and(eq(pages.id, id), eq(pages.userId, payload.sub as string))).limit(1)
       if (pageToUpdate.length === 0) {
+        set.status = 404
         return { success: false, error: 'page not found' }
       }
 
@@ -1933,6 +2087,7 @@ const app = new Elysia()
 
       const duplicate = existingPages.find(p => p.id !== id && p.createdAt >= startOfDay && p.createdAt <= endOfDay)
       if (duplicate) {
+        set.status = 409
         return { success: false, error: 'A page with this name already exists on this day' }
       }
 
@@ -1942,11 +2097,14 @@ const app = new Elysia()
         .returning()
 
       if (updatedPage.length === 0) {
+        set.status = 404
         return { success: false, error: 'page not found' }
       }
 
       return { success: true, page: formatPage(updatedPage[0]!) }
-    } catch {
+    } catch (error) {
+      console.error('Update page failed:', error)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -1954,11 +2112,17 @@ const app = new Elysia()
   // ── DELETE /pages/:id — Delete a page ──
   .delete('/pages/:id', async ({ params, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
-    if (!token) return { success: false, error: 'unauthorized' }
+    if (!token) {
+      set.status = 401
+      return { success: false, error: 'unauthorized' }
+    }
 
     try {
       const payload = await jwt.verify(token)
-      if (!payload) return { success: false, error: 'invalid token' }
+      if (!payload) {
+        set.status = 401
+        return { success: false, error: 'invalid token' }
+      }
 
       const { id } = params
 
@@ -1979,10 +2143,16 @@ const app = new Elysia()
         await tx.delete(pages).where(eq(pages.id, page.id))
         return true
       })
-      if (deleted) void drainAssetDeletionQueue()
+      if (!deleted) {
+        set.status = 404
+        return { success: false, error: 'page not found' }
+      }
+      void drainAssetDeletionQueue()
 
       return { success: true }
-    } catch {
+    } catch (error) {
+      console.error('Delete page failed:', error)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -2034,8 +2204,7 @@ const app = new Elysia()
       }
 
       const { id } = params
-      const requestBody = body as { type?: unknown; content?: unknown; title?: unknown; x?: unknown; y?: unknown }
-      const { type, content, title, x, y } = requestBody
+      const { type, content, title, x, y } = asRecord(body)
       if (!isUuid(id)) {
         set.status = 400
         return { success: false, error: 'Page id is invalid.' }
@@ -2048,7 +2217,16 @@ const app = new Elysia()
 
       const finalType = type
       const requestContent = getRequiredString(content, 'Resource content')
+      if (finalType === 'text' && requestContent.length > MAX_XOOMSHARE_TEXT_LENGTH) {
+        throw new ResourceValidationError(`Text resources must be ${MAX_XOOMSHARE_TEXT_LENGTH} characters or fewer`)
+      }
+      if (finalType === 'link' && requestContent.length > MAX_LINK_LENGTH) {
+        throw new ResourceValidationError(`Links must be ${MAX_LINK_LENGTH} characters or fewer`)
+      }
       const requestTitle = getOptionalString(title)
+      if (requestTitle && requestTitle.length > MAX_USER_TITLE_LENGTH) {
+        throw new ResourceValidationError(`Resource title must be ${MAX_USER_TITLE_LENGTH} characters or fewer`)
+      }
       const resourceX = normalizeResourceCoordinate(x, randomResourceCoordinate())
       const resourceY = normalizeResourceCoordinate(y, randomResourceCoordinate())
 
@@ -2098,9 +2276,7 @@ const app = new Elysia()
       // Persisted metadata owns the remote asset from this point onward.
       uploadedAsset = null
 
-      if (app.server) {
-        app.server.publish(`page_${id}`, JSON.stringify({ type: 'resource_updated' }))
-      }
+      publishPageUpdate(id)
 
       set.status = 201
       return { success: true, resource: formatResource(newResource[0]!) }
@@ -2147,19 +2323,40 @@ const app = new Elysia()
       return { success: false, error: 'Unable to save this resource right now. Please try again.' }
     }
   })
-  // ── GET /resources/:id — Fetch a single resource ──
+  // ── GET /resources/:id — Fetch a single downloadable resource ──
+  // Unauthenticated by design (the Next.js download route and shared download
+  // links call it without cookies), so the unguessable id acts as a capability.
+  // It therefore only serves file-like resources: private text/link content
+  // must never be readable by id alone, and expired Xoomshare rooms are gone.
   .get('/resources/:id', async ({ params, set }) => {
     try {
       if (!isUuid(params.id)) {
         set.status = 400
         return { success: false, error: 'Resource id is invalid.' }
       }
-      const [resource] = await db.select().from(resources).where(eq(resources.id, params.id)).limit(1)
-      if (!resource) return { success: false, error: 'not found' }
-      return { success: true, resource: formatResource(resource) }
+      const [row] = await db.select({ resource: resources, page: pages })
+        .from(resources)
+        .innerJoin(pages, eq(resources.pageId, pages.id))
+        .where(eq(resources.id, params.id))
+        .limit(1)
+      if (!row || (row.resource.type !== 'image' && row.resource.type !== 'pdf' && row.resource.type !== 'file')) {
+        set.status = 404
+        return { success: false, error: 'not found' }
+      }
+      if (row.page.sessionId) {
+        const [roomRoot] = await db.select().from(pages)
+          .where(and(eq(pages.sessionId, row.page.sessionId), isNotNull(pages.pathCode)))
+          .limit(1)
+        if (!roomRoot || isPageExpired(roomRoot)) {
+          set.status = 404
+          return { success: false, error: 'not found' }
+        }
+      }
+      return { success: true, resource: formatResource(row.resource) }
 
     } catch (e) {
       console.error(e)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -2179,9 +2376,9 @@ const app = new Elysia()
         return { success: false, error: 'Please sign in again to move resources.' }
       }
 
-      const { x, y } = body as { x?: unknown; y?: unknown };
-      const resourceX = normalizeResourceCoordinate(x, 100)
-      const resourceY = normalizeResourceCoordinate(y, 100)
+      const { x, y } = asRecord(body)
+      const resourceX = requireResourceCoordinate(x)
+      const resourceY = requireResourceCoordinate(y)
       
       if (!isUuid(params.id)) {
         set.status = 400
@@ -2215,9 +2412,7 @@ const app = new Elysia()
         .where(eq(resources.id, params.id))
         .returning();
 
-      if (app.server) {
-        app.server.publish(`page_${resource.pageId}`, JSON.stringify({ type: 'resource_updated' }))
-      }
+      publishPageUpdate(resource.pageId)
 
       return { success: true, resource: formatResource(updatedResource!) };
     } catch (e: unknown) {
@@ -2253,10 +2448,14 @@ const app = new Elysia()
         return { success: false, error: 'Resource id is invalid.' }
       }
 
-      const { content } = body as { content?: unknown }
+      const { content } = asRecord(body)
       if (typeof content !== 'string' || content.trim().length === 0) {
         set.status = 400
         return { success: false, error: 'Text content is required.' }
+      }
+      if (content.length > MAX_XOOMSHARE_TEXT_LENGTH) {
+        set.status = 400
+        return { success: false, error: `Text resources must be ${MAX_XOOMSHARE_TEXT_LENGTH} characters or fewer` }
       }
 
       const [resource] = await db
@@ -2292,9 +2491,7 @@ const app = new Elysia()
         .where(eq(resources.id, params.id))
         .returning()
 
-      if (app.server) {
-        app.server.publish(`page_${resource.pageId}`, JSON.stringify({ type: 'resource_updated' }))
-      }
+      publishPageUpdate(resource.pageId)
 
       return {
         success: true,
@@ -2310,11 +2507,17 @@ const app = new Elysia()
   // ── DELETE /resources/:id — Delete a resource ──
   .delete('/resources/:id', async ({ params, jwt, cookie: { auth_token }, set }) => {
     const token = auth_token?.value as string | undefined
-    if (!token) return { success: false, error: 'unauthorized' }
+    if (!token) {
+      set.status = 401
+      return { success: false, error: 'unauthorized' }
+    }
 
     try {
       const payload = await jwt.verify(token)
-      if (!payload) return { success: false, error: 'invalid token' }
+      if (!payload) {
+        set.status = 401
+        return { success: false, error: 'invalid token' }
+      }
 
       const { id } = params
 
@@ -2337,6 +2540,7 @@ const app = new Elysia()
         .limit(1)
 
       if (resourceToDelete.length === 0) {
+        set.status = 404
         return { success: false, error: 'resource not found' }
       }
 
@@ -2345,14 +2549,13 @@ const app = new Elysia()
         await tx.delete(resources).where(eq(resources.id, id))
       })
 
-      if (app.server) {
-        app.server.publish(`page_${resourceToDelete[0]!.pageId}`, JSON.stringify({ type: 'resource_updated' }))
-      }
+      publishPageUpdate(resourceToDelete[0]!.pageId)
       void drainAssetDeletionQueue()
 
       return { success: true }
     } catch (e) {
       console.error(e)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -2361,13 +2564,15 @@ const app = new Elysia()
   // ══════════════════════════════════════════════
 
   // ── GET /public/users/:username — Get public profile and public pages ──
-  .get('/public/users/:username', async ({ params }) => {
+  .get('/public/users/:username', async ({ params, set }) => {
     try {
-      const { username } = params
+      // Usernames are stored lowercase; the URL segment may not be.
+      const username = params.username.trim().toLowerCase()
 
       // Find user
       const userList = await db.select().from(users).where(eq(users.username, username)).limit(1)
       if (userList.length === 0) {
+        set.status = 404
         return { success: false, error: 'User not found' }
       }
       const user = userList[0]!
@@ -2392,6 +2597,7 @@ const app = new Elysia()
       }
     } catch (e) {
       console.error(e)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })
@@ -2409,12 +2615,16 @@ const app = new Elysia()
       // Verify the page exists and is public
       const pageList = await db.select().from(pages).where(eq(pages.id, pageId)).limit(1)
       if (pageList.length === 0) {
+        set.status = 404
         return { success: false, error: 'Page not found' }
       }
 
       const page = pageList[0]!
 
-      if (page.visibility !== 'public') {
+      // Xoomshare room pages are "public" rows without an owner; they are only
+      // reachable with the room's secret path code, never through this endpoint.
+      if (page.visibility !== 'public' || !page.userId || page.sessionId) {
+        set.status = 403
         return { success: false, error: 'Access denied' }
       }
 
@@ -2422,6 +2632,7 @@ const app = new Elysia()
       return { success: true, resources: pageResources.map(formatResource) }
     } catch (e) {
       console.error(e)
+      set.status = 500
       return { success: false, error: 'server error' }
     }
   })

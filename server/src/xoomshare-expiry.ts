@@ -1,6 +1,22 @@
 import { and, isNotNull, lt, or } from 'drizzle-orm'
 import { pages } from './db/schema'
 
+export type XoomsharePageTiming = {
+  sessionId: string | null
+  expiresAt: Date | null
+  createdAt: Date
+}
+
+/** A room never outlives `createdAt + ttl`, even if a larger expiresAt was stored. */
+export const getEffectiveXoomshareExpiresAt = (page: XoomsharePageTiming, ttlMs: number) => {
+  if (!page.sessionId && !page.expiresAt) return null
+
+  const ttlExpiry = new Date(page.createdAt.getTime() + ttlMs)
+  if (!page.expiresAt) return ttlExpiry
+
+  return page.expiresAt.getTime() <= ttlExpiry.getTime() ? page.expiresAt : ttlExpiry
+}
+
 /**
  * Keep timestamp values attached to their Drizzle columns so the postgres-js
  * driver receives encoded timestamp strings rather than raw Date instances.

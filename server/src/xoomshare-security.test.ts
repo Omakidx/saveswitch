@@ -68,3 +68,16 @@ describe('Xoomshare release security controls', () => {
     expect(budget.consume(socket, 2, 1_000, 1_000)).toBe(true)
   })
 })
+
+describe('rate limiter sweeping', () => {
+  test('still frees expired keys and enforces the entry cap after sweeps are throttled', () => {
+    const limiter = new FixedWindowRateLimiter(2)
+    expect(limiter.consume('a', 1, 10_000, 0).allowed).toBe(true)
+    expect(limiter.consume('b', 1, 10_000, 1).allowed).toBe(true)
+    // Cap reached: the oldest key is evicted to admit a new one rather than growing unbounded.
+    expect(limiter.consume('c', 1, 10_000, 2).allowed).toBe(true)
+    expect(limiter.consume('c', 1, 10_000, 3).allowed).toBe(false)
+    // After the window, the same key is allowed again.
+    expect(limiter.consume('c', 1, 10_000, 10_002).allowed).toBe(true)
+  })
+})

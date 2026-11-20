@@ -28,4 +28,10 @@ describe('resolveRuntimeConfig', () => {
     expect(() => resolveRuntimeConfig({ ...productionEnv, CLIENT_ORIGIN: 'http://localhost:5173' })).toThrow('CLIENT_ORIGIN')
     expect(() => resolveRuntimeConfig({ ...productionEnv, GOOGLE_REDIRECT_URI: 'https://api.example.com/other' })).toThrow('GOOGLE_REDIRECT_URI')
   })
+
+  test('treats Railway as production even when NODE_ENV is unset, so the dev JWT secret cannot apply', () => {
+    expect(() => resolveRuntimeConfig({ RAILWAY_ENVIRONMENT: 'production' })).toThrow('JWT_SECRET')
+    expect(resolveRuntimeConfig({ ...productionEnv, NODE_ENV: undefined, RAILWAY_ENVIRONMENT: 'production' }).isProduction).toBe(true)
+    expect(resolveRuntimeConfig({ RAILWAY_ENVIRONMENT: 'dev', SAVESWITCH_DEV_MODE: 'true' }).isProduction).toBe(false)
+  })
 })
