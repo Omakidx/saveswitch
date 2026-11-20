@@ -1,0 +1,29 @@
+# Railway image: the API plus a Cloudflare tunnel (see railway-start.ts).
+# Requires the TUNNEL_TOKEN service variable. The Heroku image stays in Dockerfile.
+FROM oven/bun:1.3.14 AS runtime
+
+ARG CLOUDFLARED_VERSION=2026.9.1
+ARG CLOUDFLARED_SHA256=03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd68cc
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl \
+  && curl -fsSL -o /usr/local/bin/cloudflared \
+    "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64" \
+  && echo "${CLOUDFLARED_SHA256}  /usr/local/bin/cloudflared" | sha256sum -c - \
+  && chmod +x /usr/local/bin/cloudflared \
+  && apt-get purge -y curl && apt-get autoremove -y \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
+
+COPY src ./src
+COPY tsconfig.json railway-start.ts ./
+
+USER bun
+
+CMD ["bun", "railway-start.ts"]

@@ -2642,6 +2642,10 @@ const serverPort = Number(process.env.PORT) || 5000
 const serverOptions = { port: serverPort, maxRequestBodySize: MAX_REQUEST_BODY_BYTES }
 if (DEV_MODE) {
   app.listen({ ...serverOptions, hostname: '127.0.0.1' })
+} else if (process.env.API_HOST) {
+  // Lets a co-located proxy (e.g. the Cloudflare tunnel in Dockerfile.railway)
+  // keep the API off the container's public interface.
+  app.listen({ ...serverOptions, hostname: process.env.API_HOST })
 } else {
   app.listen(serverOptions)
 }
