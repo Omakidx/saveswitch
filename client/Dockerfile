@@ -36,11 +36,13 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-COPY package.json ./
-COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --chown=node:node package.json ./
+COPY --chown=node:node --from=production-dependencies /app/node_modules ./node_modules
 
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/next.config.ts ./next.config.ts
+COPY --chown=node:node --from=builder /app/.next ./.next
+COPY --chown=node:node --from=builder /app/public ./public
+COPY --chown=node:node --from=builder /app/next.config.ts ./next.config.ts
 
-CMD ["sh", "-c", "node node_modules/next/dist/bin/next start -p ${PORT:-5173}"]
+USER node
+
+CMD ["sh", "-c", "node node_modules/next/dist/bin/next start -H 0.0.0.0 -p ${PORT:-5173}"]

@@ -6,4 +6,4 @@ build:
     NEXT_PUBLIC_API_URL: https://api.saveswitch.xyz
 
 run:
-  web: node node_modules/next/dist/bin/next start -p ${PORT:-5173}
+  web: node node_modules/next/dist/bin/next start -H 0.0.0.0 -p ${PORT:-5173}
