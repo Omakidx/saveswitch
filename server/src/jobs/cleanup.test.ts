@@ -14,9 +14,12 @@ const makeCleanupSql = ({
 }) => {
   const queries: string[] = []
   let released = 0
-  const reserved: any = (parts: TemplateStringsArray) => {
+  const reserved: any = (parts: TemplateStringsArray, ...args: unknown[]) => {
     const query = parts.join('?').replace(/\s+/g, ' ').trim()
     queries.push(query)
+    // Drizzle's wrapper makes the shared client pass Date objects through raw.
+    if (args.some((arg) => arg instanceof Date)) throw new TypeError(`raw Date parameter in: ${query}`)
+    if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(query)) return Promise.resolve([])
     if (query.includes('pg_try_advisory_lock')) return Promise.resolve([{ acquired: true }])
     if (query.includes('pg_advisory_unlock')) return Promise.resolve([{ released: true }])
     if (query.includes('SELECT id, session_id') && query.includes('FROM pages')) return Promise.resolve(candidates)
@@ -29,7 +32,7 @@ const makeCleanupSql = ({
     if (query.includes('UPDATE asset_deletion_queue')) return Promise.resolve([])
     throw new Error(`unexpected cleanup query: ${query}`)
   }
-  reserved.begin = async (callback: (tx: any) => Promise<unknown>) => callback(reserved)
+  // Real postgres-js reserved connections have no .begin(); keep the fake honest.
   reserved.release = () => { released += 1 }
   return {
     sql: { reserve: async () => reserved },
@@ -92,6 +95,7 @@ describe('cleanup lock lifecycle', () => {
     expect(destroyed).toEqual(['room/asset'])
     expect(fake.queries.some((query) => query.includes('INSERT INTO asset_deletion_queue'))).toBe(true)
     expect(fake.queries.some((query) => query.includes('DELETE FROM asset_deletion_queue'))).toBe(true)
+    expect(fake.queries.filter((query) => query === 'BEGIN').length).toBe(fake.queries.filter((query) => query === 'COMMIT').length)
     expect(fake.released()).toBe(1)
   })
 
@@ -104,6 +108,24 @@ describe('cleanup lock lifecycle', () => {
     expect(summary.assetFailures).toBe(1)
     expect(cleanupExitCode(summary)).toBe(2)
     expect(fake.queries.some((query) => query.includes('SET attempts = attempts + 1'))).toBe(true)
+    expect(fake.released()).toBe(1)
+  })
+
+  test('rolls back a failed room and keeps going', async () => {
+    const fake = makeCleanupSql({ candidates: [{ id: 'root', session_id: 'room' }] })
+    const original = fake.sql.reserve
+    fake.sql.reserve = async () => {
+      const reserved: any = await original()
+      const wrapped: any = (parts: TemplateStringsArray, ...args: unknown[]) => {
+        if (parts.join('?').includes('UPDATE pages SET xoomshare_resource_count')) return Promise.reject(new Error('row lock failed'))
+        return reserved(parts, ...args)
+      }
+      wrapped.release = reserved.release
+      return wrapped
+    }
+    const summary = await runCleanupJob({ sql: fake.sql })
+    expect(summary.roomFailures).toBe(1)
+    expect(fake.queries).toContain('ROLLBACK')
     expect(fake.released()).toBe(1)
   })
 })

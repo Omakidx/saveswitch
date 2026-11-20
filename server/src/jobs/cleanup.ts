@@ -12,6 +12,22 @@ export type CleanupSummary = {
   assetFailures: number
 }
 
+/**
+ * postgres-js reserved connections have no `.begin()`, so run the transaction
+ * with explicit statements on the same reserved session.
+ */
+const inTransaction = async <T = any>(conn: any, fn: (tx: any) => Promise<T>): Promise<T> => {
+  await conn`BEGIN`
+  try {
+    const result = await fn(conn)
+    await conn`COMMIT`
+    return result
+  } catch (error) {
+    await conn`ROLLBACK`.catch(() => {})
+    throw error
+  }
+}
+
 export const cleanupExitCode = (summary: CleanupSummary, fatal = false) =>
   fatal ? 1 : summary.roomFailures > 0 || summary.assetFailures > 0 ? 2 : 0
 
@@ -30,6 +46,11 @@ export const runCleanupJob = async ({
   now?: Date
   limit?: number
 }): Promise<CleanupSummary> => {
+    // Drizzle's postgres-js wrapper replaces the client's timestamp serializers with
+  // pass-throughs, so a raw Date reaches the wire and throws ERR_INVALID_ARG_TYPE.
+  // Send ISO strings; Postgres casts them against the timestamp columns.
+  const nowIso = now.toISOString()
+  const ttlCutoffIso = new Date(now.getTime() - XOOMSHARE_TTL_MS).toISOString()
   const summary: CleanupSummary = { skipped: false, roomsDeleted: 0, roomFailures: 0, assetsDeleted: 0, assetFailures: 0 }
   const reserved = await sql.reserve()
   let locked = false
@@ -38,19 +59,19 @@ export const runCleanupJob = async ({
     locked = Boolean(lockResult[0]?.acquired)
     if (!locked) return { ...summary, skipped: true }
 
-    const candidates = await reserved.begin((tx: any) => tx`
+    const candidates = await inTransaction<any[]>(reserved, (tx: any) => tx`
         SELECT id, session_id
         FROM pages
         WHERE path_code IS NOT NULL
           AND session_id IS NOT NULL
-          AND (expires_at < ${now} OR created_at < ${new Date(now.getTime() - XOOMSHARE_TTL_MS)})
+          AND (expires_at < ${nowIso} OR created_at < ${ttlCutoffIso})
         ORDER BY created_at ASC
         LIMIT ${limit}
         FOR UPDATE SKIP LOCKED
       `)
     for (const candidate of candidates) {
       try {
-        await reserved.begin(async (tx: any) => {
+        await inTransaction(reserved, async (tx: any) => {
           // Recheck under a row lock. This protects a room revived/changed after
           // candidate selection and serializes removal with room mutations.
           const roots = await tx`
@@ -58,7 +79,7 @@ export const runCleanupJob = async ({
             WHERE id = ${candidate.id}
               AND path_code IS NOT NULL
               AND session_id = ${candidate.session_id}
-              AND (expires_at < ${now} OR created_at < ${new Date(now.getTime() - XOOMSHARE_TTL_MS)})
+              AND (expires_at < ${nowIso} OR created_at < ${ttlCutoffIso})
             RETURNING session_id
           `
           if (roots.length === 0) return
@@ -85,7 +106,7 @@ export const runCleanupJob = async ({
       }
     }
 
-    const queue = await reserved.begin((tx: any) => tx`
+    const queue = await inTransaction<any[]>(reserved, (tx: any) => tx`
       SELECT id, provider_public_id, provider_resource_type
       FROM asset_deletion_queue
       ORDER BY created_at ASC
@@ -103,7 +124,7 @@ export const runCleanupJob = async ({
         } else if (outcome.incrementAttempts) {
           await reserved`
             UPDATE asset_deletion_queue
-            SET attempts = attempts + 1, last_error = 'Cloudinary destroy failed; retry scheduled', updated_at = ${new Date()}
+            SET attempts = attempts + 1, last_error = 'Cloudinary destroy failed; retry scheduled', updated_at = ${new Date().toISOString()}
             WHERE id = ${item.id}
           `
           summary.assetFailures += 1
@@ -112,7 +133,7 @@ export const runCleanupJob = async ({
         // Retain the durable row even if the provider client itself throws.
         await reserved`
           UPDATE asset_deletion_queue
-          SET attempts = attempts + 1, last_error = 'Cloudinary destroy failed; retry scheduled', updated_at = ${new Date()}
+          SET attempts = attempts + 1, last_error = 'Cloudinary destroy failed; retry scheduled', updated_at = ${new Date().toISOString()}
           WHERE id = ${item.id}
         `
         summary.assetFailures += 1
