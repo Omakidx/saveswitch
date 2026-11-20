@@ -363,7 +363,9 @@ const InfiniteCanvas = forwardRef<InfiniteCanvasRef, InfiniteCanvasProps>(({
       {/* ── Zoom Controls ── */}
       {isActive && (
         <div
-          className="absolute bottom-5 right-5 z-50 flex h-9 items-center gap-0.5 rounded-full border border-white/55 bg-white/[0.28] px-1.5 text-[#2b2b28] shadow-[0_6px_18px_rgba(68,63,42,0.11)] backdrop-blur-2xl"
+          // On phones the category rail sits along the bottom edge, so the zoom pill moves
+          // under the top-right actions (and below their popovers) to stay clear of it.
+          className="absolute bottom-5 right-5 z-50 max-[680px]:bottom-auto max-[680px]:right-3.5 max-[680px]:top-[64px] max-[680px]:z-20 flex h-9 items-center gap-0.5 rounded-full border border-white/55 bg-white/[0.28] px-1.5 text-[#2b2b28] shadow-[0_6px_18px_rgba(68,63,42,0.11)] backdrop-blur-2xl"
           data-canvas-ignore-wheel
           onPointerDown={(e) => e.stopPropagation()}
         >
