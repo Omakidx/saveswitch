@@ -9,3 +9,6 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local PGlite development database
+.saveswitch-dev-db/

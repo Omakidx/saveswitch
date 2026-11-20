@@ -7,7 +7,7 @@ const useEmbeddedDevelopmentDatabase =
   process.env.NODE_ENV === 'development' &&
   process.env.SAVESWITCH_DEV_MODE === 'true';
 
-const developmentDatabasePath = new URL('../../.saveswitch-dev-db/', import.meta.url).pathname;
+const developmentDatabasePath = new URL('../../../.saveswitch-dev-db/', import.meta.url).pathname;
 
 const createDatabase = () => {
   if (useEmbeddedDevelopmentDatabase) {

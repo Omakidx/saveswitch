@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 
 import type { Category } from "@/components/dashboard/CategorySwitch";
 import type { PageData } from "@/components/dashboard/ResourceMiniPanel";
@@ -17,27 +17,47 @@ interface DashboardUser {
   email: string;
 }
 
+export interface ChromeMenuItem {
+  label: string;
+  onSelect: () => void;
+  tone?: "danger";
+}
+
 interface FigmaDashboardChromeProps {
-  user: DashboardUser | null;
+  user?: DashboardUser | null;
   pages: PageData[];
   resources: Resource[];
   activePageId: string | null;
   activeCategory: Category;
-  visibility: Visibility;
+  /** Omit (with onVisibilityChange) to hide the Private/Public switch. */
+  visibility?: Visibility;
   onPageSelect: (id: string) => void;
-  onDeletePage: (id: string) => void;
+  onDeletePage?: (id: string) => void;
   onAddPage: () => void | Promise<void>;
   onCategoryChange: (category: Category) => void;
   onResourceSelect: (resource: Resource, category: Category) => void;
   onDeleteResource: (id: string) => void;
-  onVisibilityChange: (visibility: Visibility) => void;
+  onVisibilityChange?: (visibility: Visibility) => void;
   onFileUploads: (files: File[]) => void | Promise<void>;
   onPaste: () => void | Promise<void>;
   isResourceIngesting?: boolean;
   isLoadingPages?: boolean;
   ingestionProgress?: { completed: number; total: number } | null;
-  onOpenProfile: () => void;
-  onLogout: () => void;
+  onOpenProfile?: () => void;
+  onLogout?: () => void;
+  /** Rendered at the top-left corner (e.g. a back button). */
+  topLeading?: ReactNode;
+  /** Rendered above the page switcher in place of the visibility switch. */
+  bottomLeading?: ReactNode;
+  canAddPage?: boolean;
+  canAddResources?: boolean;
+  canDeletePage?: (page: PageData) => boolean;
+  canDeleteResource?: (resource: Resource) => boolean;
+  /** Replaces the account menu with these actions. */
+  menuItems?: ChromeMenuItem[];
+  menuTitle?: string;
+  menuButtonLabel?: string;
+  menuIcon?: ReactNode;
 }
 
 const ASSET_ROOT = "/assets/figma-dashboard";
@@ -148,7 +168,7 @@ function getResourceTypeLabel(resource: Resource) {
 }
 
 export default function FigmaDashboardChrome({
-  user,
+  user: userProp,
   pages,
   resources,
   activePageId,
@@ -168,7 +188,18 @@ export default function FigmaDashboardChrome({
   ingestionProgress = null,
   onOpenProfile,
   onLogout,
+  topLeading,
+  bottomLeading,
+  canAddPage = true,
+  canAddResources = true,
+  canDeletePage,
+  canDeleteResource,
+  menuItems,
+  menuTitle,
+  menuButtonLabel = "Open account menu",
+  menuIcon,
 }: FigmaDashboardChromeProps) {
+  const user = userProp ?? null;
   const [isPageMenuOpen, setIsPageMenuOpen] = useState(false);
   const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -239,7 +270,7 @@ export default function FigmaDashboardChrome({
   };
 
   const handleCreatePage = async () => {
-    if (isAddingPage) return;
+    if (isAddingPage || !canAddPage) return;
 
     setIsAddingPage(true);
     try {
@@ -325,17 +356,19 @@ export default function FigmaDashboardChrome({
                             <span className={styles.categoryResourceName}>{label}</span>
                             <span className={styles.categoryResourceType}>{getResourceTypeLabel(resource)}</span>
                           </button>
-                          <button
-                            type="button"
-                            className={styles.deleteResourceButton}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onDeleteResource(resource.id);
-                            }}
-                            aria-label={`Delete ${label}`}
-                          >
-                            <DeleteIcon size={14} />
-                          </button>
+                          {(canDeleteResource?.(resource) ?? true) && (
+                            <button
+                              type="button"
+                              className={styles.deleteResourceButton}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onDeleteResource(resource.id);
+                              }}
+                              aria-label={`Delete ${label}`}
+                            >
+                              <DeleteIcon size={14} />
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -398,14 +431,16 @@ export default function FigmaDashboardChrome({
                               <Image src={`${ASSET_ROOT}/file-item.svg`} alt="" width={17} height={17} />
                               <span>{createdLabel}</span>
                             </button>
-                            <button
-                              type="button"
-                              className={styles.deletePageButton}
-                              onClick={() => onDeletePage(page.id)}
-                              aria-label={`Delete page created ${createdLabel}`}
-                            >
-                              <DeleteIcon size={18} />
-                            </button>
+                            {onDeletePage && (canDeletePage?.(page) ?? true) && (
+                              <button
+                                type="button"
+                                className={styles.deletePageButton}
+                                onClick={() => onDeletePage(page.id)}
+                                aria-label={`Delete page created ${createdLabel}`}
+                              >
+                                <DeleteIcon size={18} />
+                              </button>
+                            )}
                           </div>
                         );
                       })}
@@ -424,13 +459,15 @@ export default function FigmaDashboardChrome({
             type="button"
             className={styles.topIconButton}
             onClick={() => setIsUploadMenuOpen((open) => !open)}
-            aria-label={isResourceIngesting ? (ingestionProgress ? `Saving ${ingestionProgress.completed} of ${ingestionProgress.total} resources` : "Saving resources") : "Add resources"}
+            disabled={!canAddResources}
+            title={canAddResources ? "Add resources" : "This page is view only"}
+            aria-label={!canAddResources ? "Adding resources is disabled" : isResourceIngesting ? (ingestionProgress ? `Saving ${ingestionProgress.completed} of ${ingestionProgress.total} resources` : "Saving resources") : "Add resources"}
             aria-busy={isResourceIngesting}
             aria-expanded={isUploadMenuOpen}
           >
             <Image src={`${ASSET_ROOT}/upload.svg`} alt="" width={21} height={21} />
           </button>
-          {isUploadMenuOpen && (
+          {isUploadMenuOpen && canAddResources && (
             <div className={`${styles.actionPopover} ${styles.glassPopover}`}>
               <label className={styles.actionPopoverButton}>
                 Upload files
@@ -460,33 +497,61 @@ export default function FigmaDashboardChrome({
             type="button"
             className={styles.topIconButton}
             onClick={() => setIsProfileMenuOpen((open) => !open)}
-            aria-label="Open account menu"
+            aria-label={menuButtonLabel}
             aria-expanded={isProfileMenuOpen}
           >
-            <span className={styles.profileBlob} style={profileBlobStyle} aria-hidden="true" />
+            {menuIcon ?? <span className={styles.profileBlob} style={profileBlobStyle} aria-hidden="true" />}
           </button>
           {isProfileMenuOpen && (
             <div className={`${styles.actionPopover} ${styles.glassPopover}`}>
-              {user && <p className={styles.accountName}>{user.name || user.email}</p>}
-              <button type="button" className={styles.actionPopoverButton} onClick={onOpenProfile}>
-                Profile
-              </button>
-              {user && (
-                <button type="button" className={styles.actionPopoverButton} onClick={onLogout}>
-                  Sign out
-                </button>
+              {menuItems ? (
+                <>
+                  {menuTitle && <p className={styles.accountName}>{menuTitle}</p>}
+                  {menuItems.map((item) => (
+                    <button
+                      type="button"
+                      key={item.label}
+                      className={`${styles.actionPopoverButton} ${item.tone === "danger" ? styles.actionPopoverDanger : ""}`}
+                      onClick={() => {
+                        setIsProfileMenuOpen(false);
+                        item.onSelect();
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </>
+              ) : (
+                <>
+                  {user && <p className={styles.accountName}>{user.name || user.email}</p>}
+                  {onOpenProfile && (
+                    <button type="button" className={styles.actionPopoverButton} onClick={onOpenProfile}>
+                      Profile
+                    </button>
+                  )}
+                  {user && onLogout && (
+                    <button type="button" className={styles.actionPopoverButton} onClick={onLogout}>
+                      Sign out
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}
         </div>
       </div>
 
+      {topLeading && <div className={styles.topLeading}>{topLeading}</div>}
+
       <section className={styles.bottomControls} aria-label="Page controls">
         <div className={styles.pageSwitch} aria-label="Choose or create a page">
-          <div className={styles.visibilityControl} role="group" aria-label="Workspace visibility">
-            <button type="button" onClick={() => onVisibilityChange("private")} aria-pressed={visibility === "private"} className={visibility === "private" ? styles.visibilityActive : ""}>Private</button>
-            <button type="button" onClick={() => onVisibilityChange("public")} aria-pressed={visibility === "public"} className={visibility === "public" ? styles.visibilityActive : ""}>Public</button>
-          </div>
+          {bottomLeading}
+          {visibility && onVisibilityChange && (
+            <div className={styles.visibilityControl} role="group" aria-label="Workspace visibility">
+              <button type="button" onClick={() => onVisibilityChange("private")} aria-pressed={visibility === "private"} className={visibility === "private" ? styles.visibilityActive : ""}>Private</button>
+              <button type="button" onClick={() => onVisibilityChange("public")} aria-pressed={visibility === "public"} className={visibility === "public" ? styles.visibilityActive : ""}>Public</button>
+            </div>
+          )}
           <div className={styles.pageColorList}>
             {(pages.length === 0 ? [{ id: "__starter__", color: "#fffDCE", createdAt: "", name: "Create your first page" }] : pages).map((page) => (
               <button
@@ -495,7 +560,7 @@ export default function FigmaDashboardChrome({
                 className={`${styles.pageColor} ${page.id === activePageId ? styles.pageColorActive : ""}`}
                 style={{ backgroundColor: page.color }}
                 onClick={page.id === "__starter__" ? handleCreatePage : () => onPageSelect(page.id)}
-                disabled={page.id === "__starter__" && (isAddingPage || isLoadingPages)}
+                disabled={page.id === "__starter__" && (isAddingPage || isLoadingPages || !canAddPage)}
                 aria-label={page.id === "__starter__" && isAddingPage ? "Creating your first page" : `Open ${page.name}`}
                 aria-pressed={page.id === activePageId}
                 aria-busy={page.id === "__starter__" ? isAddingPage : undefined}
@@ -503,18 +568,22 @@ export default function FigmaDashboardChrome({
               />
             ))}
           </div>
-          <button
-            type="button"
-            className={styles.addPageButton}
-            onClick={handleCreatePage}
-            disabled={isAddingPage}
-            aria-label={isAddingPage ? "Creating a new page" : "Create a new page"}
-            aria-busy={isAddingPage}
-          >
-            <Image src={`${ASSET_ROOT}/add-subpage.svg`} alt="" width={21} height={21} className={isAddingPage ? styles.addPageIconPending : undefined} />
-          </button>
+          {canAddPage && (
+            <button
+              type="button"
+              className={styles.addPageButton}
+              onClick={handleCreatePage}
+              disabled={isAddingPage}
+              aria-label={isAddingPage ? "Creating a new page" : "Create a new page"}
+              aria-busy={isAddingPage}
+            >
+              <Image src={`${ASSET_ROOT}/add-subpage.svg`} alt="" width={21} height={21} className={isAddingPage ? styles.addPageIconPending : undefined} />
+            </button>
+          )}
         </div>
       </section>
     </>
   );
 }
+
+export { styles as chromeStyles };

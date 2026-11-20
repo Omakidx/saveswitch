@@ -72,7 +72,7 @@ export default function CreateXoomsharePage() {
               spellCheck={false}
               minLength={12}
               maxLength={48}
-              pattern="[A-Za-z0-9_-]{12,48}"
+              pattern="[A-Za-z0-9_\-]{12,48}"
               title="Use 12–48 letters, numbers, hyphens, or underscores."
               placeholder="e.g. team_references"
               className="h-10 min-w-0 flex-1 border-none bg-transparent px-0 text-[14px] font-medium leading-none text-[#35362f] !outline-none focus:!border-none focus:!outline-none focus:!ring-0 placeholder:text-[#949385]"

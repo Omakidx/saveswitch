@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import CardStack from "@/components/dashboard/CardStack";
 import InfiniteCanvas, { InfiniteCanvasRef } from "@/components/dashboard/InfiniteCanvas";
+import FigmaDashboardChrome, { chromeStyles, type ChromeMenuItem } from "@/components/dashboard/figma/FigmaDashboardChrome";
+import { filterResourcesByCategory } from "@/lib/resourceFilters";
 import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
 import { API_BASE } from "@/lib/api";
@@ -39,13 +41,6 @@ interface XoomshareRoomResponse {
   room: XoomshareRoom;
   pages: PageData[];
   resources: Resource[];
-}
-
-function getFilteredResources(resources: Resource[], category: Category) {
-  if (category === "target") return resources;
-  if (category === "image") return resources.filter((resource) => resource.type === "image");
-  if (category === "link" || category === "video") return resources.filter((resource) => resource.type === "link");
-  return resources.filter((resource) => resource.type === "pdf" || resource.type === "file" || resource.type === "text");
 }
 
 function getApiErrorMessage(error: unknown, fallback: string) {
@@ -95,15 +90,6 @@ function getInitialState(pathCode: string) {
   return {};
 }
 
-function CategoryIcon({ category }: { category: Category }) {
-  const common = { width: 17, height: 17, viewBox: "0 0 24 24", fill: "none", "aria-hidden": true as const };
-  if (category === "target") return <svg {...common}><path d="m12 2 8.5 4.8v10.4L12 22l-8.5-4.8V6.8L12 2Z" stroke="currentColor" strokeWidth="1.5"/><path d="m3.8 7 8.2 4.7L20.2 7M12 11.7V22" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
-  if (category === "document") return <svg {...common}><path d="M7 3.5h7l3 3V20a.5.5 0 0 1-.5.5h-9A.5.5 0 0 1 7 20V3.5Z" stroke="currentColor" strokeWidth="1.5"/><path d="M14 3.5v3h3M9.5 11h5M9.5 14h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>;
-  if (category === "image") return <svg {...common}><rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" strokeWidth="1.5"/><circle cx="8" cy="9" r="1.4" fill="currentColor"/><path d="m4.5 17 5-5 3.5 3 2.2-2.2 4.3 4.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
-  if (category === "link") return <svg {...common}><path d="M10 14 8.5 15.5a3 3 0 0 1-4.2-4.2l3-3a3 3 0 0 1 4.2 0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/><path d="m14 10 1.5-1.5a3 3 0 0 1 4.2 4.2l-3 3a3 3 0 0 1-4.2 0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/><path d="m8.5 15.5 7-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>;
-  return <svg {...common}><rect x="3" y="6" width="13" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="m16 10 4-2v8l-4-2" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>;
-}
-
 export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientProps) {
   const router = useRouter();
   const initialState = useMemo(() => getInitialState(pathCode), [pathCode]);
@@ -111,7 +97,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const [resources, setResources] = useState<Resource[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [isCanvasMode, setIsCanvasMode] = useState<boolean>(initialState.isCanvasMode ?? false);
+  const [isCanvasMode, setIsCanvasMode] = useState<boolean>(true);
   const [activeCategory, setActiveCategory] = useState<Category>(initialState.activeCategory ?? "target");
   const [highlightedResourceId, setHighlightedResourceId] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(initialState.selectedDate ?? null);
@@ -121,8 +107,6 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const [activePageId, setActivePageId] = useState<string | null>(initialState.activePageId ?? null);
   const [isResourceDragging, setIsResourceDragging] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
-  const [isResourceMenuOpen, setIsResourceMenuOpen] = useState(false);
   const [editingPageId, setEditingPageId] = useState<string | null>(null);
   const [pageNameDraft, setPageNameDraft] = useState("");
   const [hasDismissedExpiryNotice, setHasDismissedExpiryNotice] = useState(() => {
@@ -902,21 +886,33 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
     );
   }
 
-  const filteredResources = getFilteredResources(activePageResources, activeCategory);
+  const filteredResources = filterResourcesByCategory(activePageResources, activeCategory);
   const activePage = pages.find((page) => page.id === (activePageId || room.id));
-  const categoryCounts: Record<Category, number> = {
-    target: activePageResources.length,
-    document: activePageResources.filter((resource) => resource.type === "text" || resource.type === "pdf" || resource.type === "file").length,
-    image: activePageResources.filter((resource) => resource.type === "image").length,
-    link: activePageResources.filter((resource) => resource.type === "link").length,
-    video: 0,
-  };
-  const categories: Category[] = ["target", "document", "image", "link", "video"];
+  const canManageResource = (resource: Resource) => Boolean(room.isOwner || resource.isOwner);
+  const roomMenuItems: ChromeMenuItem[] = [
+    { label: "Copy room link", onSelect: () => { void handleCopyShareLink(); } },
+    ...(room.isOwner
+      ? [
+          ...(activePage
+            ? [{ label: "Rename page", onSelect: () => { setPageNameDraft(activePage.name); setEditingPageId(activePage.id); } }]
+            : []),
+          {
+            label: room.allowGuestResources ? "Make room view only" : "Let guests add resources",
+            onSelect: handleToggleGuestAccessWithConfirm,
+          },
+          { label: "Destroy room", onSelect: handleDestroySessionWithConfirm, tone: "danger" as const },
+        ]
+      : []),
+  ];
+  const roomAccessLabel = room.isOwner
+    ? room.allowGuestResources ? "Owner · guests can add" : "Owner · guests view only"
+    : canAddResources ? "Guest · can add" : "Guest · view only";
 
   return (
     <div className={`${styles.room} relative h-dvh w-full overflow-hidden font-inter`}>
       <main
-        className="relative flex h-full min-h-0 w-full flex-col overflow-hidden"
+        className="relative h-dvh min-w-0 flex-1 overflow-hidden"
+        style={{ background: "#fffDCE" }}
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => {
           event.preventDefault();
@@ -925,151 +921,11 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
           }
         }}
       >
-        <div className="xoomshare-shell relative flex flex-1 flex-col overflow-hidden bg-transparent">
-          <div className={`${styles.roomHeader} absolute left-3 right-3 top-3 z-40 flex items-center justify-between gap-2 sm:left-5 sm:right-5 sm:top-4`}>
-            <div className="flex min-w-0 items-center gap-2">
-              {renderBackButton("shrink-0")}
-            <button
-              type="button"
-              onClick={handleCopyShareLink}
-              className={`${styles.chrome} flex h-9 min-w-0 cursor-pointer items-center gap-2 rounded-full px-3 text-[11px] font-semibold text-white transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff] sm:px-4`}
-              title="Copy Xoomshare link"
-            >
-              <span className="hidden text-white/70 sm:inline">Xoomshare</span>
-              <span className="min-w-0 truncate">{room.pathCode}</span>
-              <Image src="/icons/icon-copy.svg" alt="" width={14} height={14} className="ml-1 opacity-80 invert" />
-            </button>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {expiryCountdownLabel && (
-                <button
-                  type="button"
-                  onClick={room.isOwner && !hasDismissedExpiryNotice ? dismissExpiryNotice : undefined}
-                  className={`${styles.chrome} hidden h-9 items-center rounded-full px-3 text-[10px] font-semibold text-white/80 sm:flex`}
-                  title={room.isOwner ? "Session expiry countdown. Click to dismiss." : "Session expiry countdown"}
-                >
-                  {expiryCountdownLabel}
-                </button>
-              )}
-            {room.isOwner ? (
-              <>
-                <button
-                  type="button"
-                  onClick={handleToggleGuestAccessWithConfirm}
-                  className={`${styles.chrome} flex h-9 cursor-pointer items-center gap-2 rounded-full px-3 text-[10px] font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff] ${
-                    room.allowGuestResources
-                      ? "text-[#e9ffe9]"
-                      : "text-white/75"
-                  }`}
-                  title={room.allowGuestResources ? "Click to restrict to view-only" : "Click to let anyone add resources"}
-                >
-                  {room.allowGuestResources ? (
-                    <>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-                      <span className="hidden sm:inline">Open</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                      <span className="hidden sm:inline">View only</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDestroySessionWithConfirm}
-                  className={`${styles.chrome} ${styles.deleteAction} hidden h-9 cursor-pointer items-center gap-2 rounded-full px-3 text-[10px] font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff] sm:flex`}
-                  title="Destroy session early"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  Destroy
-                </button>
-              </>
-            ) : !canAddResources ? (
-              <span className={`${styles.chrome} rounded-full px-3 py-2 text-[10px] font-semibold text-white/75`}>
-                View only
-              </span>
-            ) : null}
-            <div className="relative">
-              <button
-                type="button"
-                disabled={!canAddResources}
-                onClick={() => setIsActionMenuOpen((open) => !open)}
-                className={`${styles.glassButton} flex h-9 w-9 items-center justify-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff] disabled:cursor-not-allowed disabled:opacity-45`}
-                aria-expanded={isActionMenuOpen}
-                aria-label="Add resources"
-                title={canAddResources ? "Add resources" : "This room is view only"}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-              </button>
-              {isActionMenuOpen && canAddResources && (
-                <div className={`${styles.popover} absolute right-0 top-[calc(100%+8px)] w-[172px] rounded-2xl p-1.5`}>
-                  <label className={`${styles.popoverAction} cursor-pointer`}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V3m0 0L7.5 7.5M12 3l4.5 4.5M5 14.5V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    Upload files
-                    <input type="file" multiple className="sr-only" onChange={(event) => {
-                      if (event.target.files?.length) handleFileUploads(Array.from(event.target.files));
-                      event.currentTarget.value = "";
-                      setIsActionMenuOpen(false);
-                    }} />
-                  </label>
-                  <button type="button" onClick={() => { setIsActionMenuOpen(false); void handlePaste(); }} className={styles.popoverAction}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 7V5a3 3 0 0 1 3-3h7a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-2M8 7h5a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-7a5 5 0 0 1 5-5Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                    Paste from clipboard
-                  </button>
-                </div>
-              )}
-            </div>
-            </div>
-          </div>
-
-          <nav aria-label="Resource categories" className={`${styles.categoryRail} absolute left-3 top-1/2 z-30 flex -translate-y-1/2 flex-col gap-1 p-1.5 sm:left-5`}>
-            {categories.map((category) => {
-              const isActive = category === activeCategory;
-              return (
-                <button
-                  key={category}
-                  type="button"
-                  onClick={() => setActiveCategory(category)}
-                  className={`${styles.categoryButton} ${isActive ? styles.categoryButtonActive : ""} relative flex h-9 w-9 items-center justify-center rounded-xl transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]`}
-                  aria-label={`Show ${category} resources`}
-                  aria-pressed={isActive}
-                  title={category}
-                >
-                  <CategoryIcon category={category} />
-                  {categoryCounts[category] > 0 && <span className={styles.categoryCount}>{categoryCounts[category]}</span>}
-                </button>
-              );
-            })}
-          </nav>
-
-          {isCanvasMode && (
-            <div className="absolute bottom-5 left-3 z-40 sm:bottom-6 sm:left-5">
-              <div className="relative">
-                <button type="button" onClick={() => setIsResourceMenuOpen((open) => !open)} className={`${styles.glassButton} flex h-9 items-center gap-2 rounded-full px-3 text-[11px] font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#176bff]`} aria-expanded={isResourceMenuOpen}>
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 5.5 12 2l8 3.5V18l-8 4-8-4V5.5Z" stroke="currentColor" strokeWidth="1.5"/><path d="m4 5.5 8 4 8-4M12 9.5V22" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg>
-                  Resources <span className={styles.inlineCount}>{filteredResources.length}</span>
-                </button>
-                {isResourceMenuOpen && (
-                  <div className={`${styles.popover} absolute bottom-[calc(100%+8px)] left-0 w-[min(240px,calc(100vw-32px))] rounded-2xl p-1.5`}>
-                    <div className={styles.resourceList}>
-                      {filteredResources.length === 0 ? <p className="px-3 py-4 text-center text-[11px] text-[#6e6d61]">No matching resources</p> : filteredResources.map((resource) => (
-                        <button key={resource.id} type="button" className={styles.resourceRow} onClick={() => { handlePanToResource(resource.id, resource.x ?? 100, resource.y ?? 100); setIsResourceMenuOpen(false); }}>
-                          <CategoryIcon category={resource.type === "image" ? "image" : resource.type === "link" ? "link" : "document"} />
-                          <span>{resource.title || `Untitled ${resource.type}`}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
+        <div className="relative h-full overflow-hidden">
           <InfiniteCanvas
             ref={canvasRef}
             isActive={isCanvasMode}
-            canvasColor="#fbf8dc"
+            canvasColor={activePage?.color || "#fffDCE"}
             canvasOffsetRef={canvasOffsetRef}
             onNavigatePage={handleCanvasPageNavigation}
             isResourceDragging={isResourceDragging}
@@ -1081,17 +937,17 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
                 isExpanded={isCanvasMode}
                 onPageSelect={handleCardSwipe}
                 resources={filteredResources}
-                onDeleteResource={(room.isOwner || canAddResources) ? (id) => {
+                onDeleteResource={canAddResources ? (id) => {
                   const resource = resources.find(r => r.id === id);
-                  if (room.isOwner || resource?.isOwner) {
+                  if (resource && canManageResource(resource)) {
                     handleDeleteResource(id);
                   } else {
                     showToast("You can only delete your own resources", "error");
                   }
                 } : undefined}
-                onUpdateResourcePosition={(room.isOwner || canAddResources) ? (id, x, y) => {
+                onUpdateResourcePosition={canAddResources ? (id, x, y) => {
                   const resource = resources.find(r => r.id === id);
-                  if (room.isOwner || resource?.isOwner) {
+                  if (resource && canManageResource(resource)) {
                     handleUpdateResourcePosition(id, x, y);
                   } else {
                     showToast("You can only move your own resources", "error");
@@ -1099,32 +955,71 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
                 } : undefined}
                 onUpdateTextResource={handleUpdateTextResource}
                 onResourceDragStateChange={setIsResourceDragging}
-                canManageResource={(resource) => Boolean(room.isOwner || resource.isOwner)}
+                canManageResource={canManageResource}
                 highlightedResourceId={highlightedResourceId}
                 readOnly={!canAddResources}
               />
             </div>
           </InfiniteCanvas>
 
-          <section aria-label="Room pages" className={`${styles.pageDock} absolute bottom-3 left-1/2 z-40 flex max-w-[calc(100vw-110px)] -translate-x-1/2 items-center gap-1.5 rounded-2xl p-1.5 sm:bottom-5`}>
-            <div className="flex max-w-[min(62vw,440px)] items-center gap-1.5 overflow-x-auto px-0.5">
-              {pages.map((page) => {
-                const isActive = page.id === (activePageId || room.id);
-                return <div className="relative shrink-0" key={page.id}>
-                  <button type="button" onClick={() => handlePageSelect(page.id)} className={`${styles.pageSwatch} ${isActive ? styles.pageSwatchActive : ""}`} style={{ backgroundColor: page.color }} aria-label={`Open ${page.name}`} aria-pressed={isActive} title={page.name} />
-                  {room.isOwner && isActive && pages.length > 1 && <button type="button" onClick={() => handleDeletePage(page.id)} className={styles.pageDelete} aria-label={`Delete ${page.name}`} title={`Delete ${page.name}`}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16m-10 4v6m4-6v6M9 7l1-3h4l1 3m-9 0 1 14h10l1-14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/></svg></button>}
-                </div>;
-              })}
-            </div>
-            {room.isOwner && <button type="button" onClick={handleAddXoomsharePage} className={styles.addPageButton} aria-label="Add page" title="Add page"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg></button>}
-            <button type="button" onClick={() => setIsCanvasMode((active) => !active)} className={`${styles.canvasToggle} ${isCanvasMode ? styles.canvasToggleActive : ""}`} aria-label={isCanvasMode ? "Exit canvas" : "Open canvas"} title={isCanvasMode ? "Exit canvas" : "Open canvas"}>
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 3.5h14a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19V5A1.5 1.5 0 0 1 5 3.5Z" stroke="currentColor" strokeWidth="1.5"/><path d="M8 8h8v8H8z" stroke="currentColor" strokeWidth="1.5"/></svg>
-            </button>
-          </section>
-
-          {room.isOwner && activePage && (
-            <button type="button" className={`${styles.renamePageButton} absolute right-3 top-[60px] z-30 rounded-full px-3 py-2 text-[10px] font-semibold sm:right-5 sm:top-[68px]`} onClick={() => { setPageNameDraft(activePage.name); setEditingPageId(activePage.id); }}>Rename page</button>
-          )}
+          <FigmaDashboardChrome
+            pages={pages}
+            resources={activePageResources}
+            activePageId={activePageId || room.id}
+            activeCategory={activeCategory}
+            onPageSelect={handlePageSelect}
+            onDeletePage={room.isOwner ? handleDeletePage : undefined}
+            canDeletePage={() => pages.length > 1}
+            onAddPage={handleAddXoomsharePage}
+            canAddPage={room.isOwner}
+            onCategoryChange={setActiveCategory}
+            onResourceSelect={(resource, category) => {
+              setActiveCategory(category);
+              handlePanToResource(resource.id, resource.x ?? 100, resource.y ?? 100);
+            }}
+            onDeleteResource={(id) => {
+              const resource = resources.find(r => r.id === id);
+              if (resource && canManageResource(resource)) handleDeleteResource(id);
+              else showToast("You can only delete your own resources", "error");
+            }}
+            canDeleteResource={(resource) => canAddResources && canManageResource(resource)}
+            onFileUploads={handleFileUploads}
+            onPaste={handlePaste}
+            canAddResources={canAddResources}
+            menuItems={roomMenuItems}
+            menuTitle={roomAccessLabel}
+            menuButtonLabel="Open room menu"
+            menuIcon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#1e1e1e" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="4" y="11" width="16" height="10" rx="2" />
+                <path d={room.allowGuestResources ? "M8 11V7a4 4 0 0 1 7.9-.9" : "M8 11V7a4 4 0 0 1 8 0v4"} />
+              </svg>
+            }
+            topLeading={
+              <button type="button" className={chromeStyles.topIconButton} onClick={handleBack} aria-label="Go back" title="Go back">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M15 6 9 12l6 6" stroke="#1e1e1e" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            }
+            bottomLeading={
+              <div className={chromeStyles.bottomTab}>
+                <button type="button" onClick={handleCopyShareLink} title="Copy Xoomshare link" aria-label={`Copy link for room ${room.pathCode}`}>
+                  <span className={chromeStyles.bottomTabText}>{room.pathCode}</span>
+                  <Image src="/icons/icon-copy.svg" alt="" width={10} height={10} className="opacity-80 invert" />
+                </button>
+                {expiryCountdownLabel && (
+                  room.isOwner && !hasDismissedExpiryNotice ? (
+                    <button type="button" className={chromeStyles.bottomTabMuted} onClick={dismissExpiryNotice} title="Time until this room expires">
+                      {expiryCountdownLabel}
+                    </button>
+                  ) : (
+                    <span className={chromeStyles.bottomTabMuted} title="Time until this room expires">{expiryCountdownLabel}</span>
+                  )
+                )}
+              </div>
+            }
+          />
         </div>
       </main>
 
