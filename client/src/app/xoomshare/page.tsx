@@ -37,7 +37,8 @@ export default function CreateXoomsharePage() {
         return;
       }
 
-      router.push(`/${encodeURIComponent(data.room.pathCode)}`);
+      // ?pair=1 opens the QR code so the next device can join without typing.
+      router.push(`/${encodeURIComponent(data.room.pathCode)}?pair=1`);
     } catch {
       setError("Network error while creating Xoomshare page");
     } finally {

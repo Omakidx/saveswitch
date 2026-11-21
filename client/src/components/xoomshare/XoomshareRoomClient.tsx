@@ -15,6 +15,8 @@ import { PageData } from "@/components/dashboard/ResourceMiniPanel";
 import { Resource } from "@/components/dashboard/ResourceCard";
 import { API_BASE } from "@/lib/api";
 import { safeGetItem, safeSetItem } from "@/lib/safeStorage";
+import { buildRoomLink } from "@/lib/roomCode";
+import PairDeviceDialog from "./PairDeviceDialog";
 import styles from "./XoomshareRoomClient.module.css";
 
 interface XoomshareRoom {
@@ -111,6 +113,10 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const [isResourceDragging, setIsResourceDragging] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [editingPageId, setEditingPageId] = useState<string | null>(null);
+  // A freshly created room arrives with ?pair=1 so the QR opens straight away.
+  const [isPairDialogOpen, setIsPairDialogOpen] = useState(
+    () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("pair") === "1",
+  );
   const [pageNameDraft, setPageNameDraft] = useState("");
   const [hasDismissedExpiryNotice, setHasDismissedExpiryNotice] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -174,6 +180,14 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3500);
     toastTimersRef.current.add(timer);
+  }, []);
+
+  // Drop ?pair=1 once read so a reload or a copied address doesn't reopen the QR.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("pair")) return;
+    url.searchParams.delete("pair");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   }, []);
 
   const handleBack = useCallback(() => {
@@ -779,7 +793,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const handleCopyShareLink = useCallback(async () => {
     if (!room) return;
     try {
-      await navigator.clipboard.writeText(`${window.location.origin}/${room.pathCode}`);
+      await navigator.clipboard.writeText(buildRoomLink(window.location.origin, room.pathCode));
       showToast("Xoomshare link copied", "success");
     } catch {
       showToast("Allow clipboard access to copy the share link.", "error");
@@ -883,6 +897,7 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
   const activePage = pages.find((page) => page.id === (activePageId || room.id));
   const canManageResource = (resource: Resource) => Boolean(room.isOwner || resource.isOwner);
   const roomMenuItems: ChromeMenuItem[] = [
+    { label: "Pair a device", onSelect: () => setIsPairDialogOpen(true) },
     { label: "Copy room link", onSelect: () => { void handleCopyShareLink(); } },
     ...(room.isOwner
       ? [
@@ -1001,6 +1016,12 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
                   <span className={chromeStyles.bottomTabText}>{room.pathCode}</span>
                   <Image src="/icons/icon-copy.svg" alt="" width={10} height={10} className="opacity-80 invert" />
                 </button>
+                <button type="button" onClick={() => setIsPairDialogOpen(true)} title="Pair a device with a QR code" aria-label="Pair a device with a QR code">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" />
+                    <path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3" />
+                  </svg>
+                </button>
                 {expiryCountdownLabel && (
                   room.isOwner && !hasDismissedExpiryNotice ? (
                     <button type="button" className={chromeStyles.bottomTabMuted} onClick={dismissExpiryNotice} title="Time until this room expires">
@@ -1043,6 +1064,16 @@ export default function XoomshareRoomClient({ pathCode }: XoomshareRoomClientPro
             </div>
           </form>
         </div>
+      )}
+
+      {isPairDialogOpen && (
+        <PairDeviceDialog
+          link={buildRoomLink(window.location.origin, room.pathCode)}
+          pathCode={room.pathCode}
+          expiresInMs={expiryRemainingMs}
+          onCopy={() => { void handleCopyShareLink(); }}
+          onClose={() => setIsPairDialogOpen(false)}
+        />
       )}
 
       {confirmModal && confirmModal.isOpen && (
