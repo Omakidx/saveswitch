@@ -1,5 +1,94 @@
 # Saveswitch — Architecture Document
 
+> **How to read this document.** Section 0 is the current product direction (v3, decided 2026-11-21) and is kept up to date. Sections 1–13 are the original design written before v1. The product goal they describe still holds, but parts of the stack and API changed during the build. Section 0.5 lists the differences.
+
+## 0. v3 Direction
+
+### 0.1 What Saveswitch is becoming
+
+**Saveswitch is the fastest way to get anything from one device to another, with no account. Sign in to keep what you move, and to share it as a public board.**
+
+v3 has a core and a second layer:
+
+- **Core (direction A): instant transfer across devices.** Xoomshare is the product. Getting text, links, images and files from a phone to a laptop (or to a friend) has to be faster than emailing yourself, and it must never need an account.
+- **Second layer (direction B): saved boards and public collections.** Signing in keeps what you transferred, organised on pages. You can publish pages at `saveswitch.xyz/@username` as visual collections that other people can follow and comment on.
+
+The order matters: B exists to give people a reason to sign in and come back, so it must never slow down or gate A.
+
+Out of scope for v3: team workspaces, shared permissions and paid team plans (direction C). Revisit for v4 once usage shows whether teams are actually using rooms.
+
+### 0.2 v3 goals
+
+| # | Goal | How we know it's met |
+|---|------|----------------------|
+| G1 | Moving one item between two devices takes seconds and needs no typing on the receiving device | Measured from opening the site on the sender to the item appearing on the receiver; target ≤ 10 s, 0 typed characters on the receiver |
+| G2 | Xoomshare never asks for an account | No step in the anonymous flow links to sign-in |
+| G3 | Anything sent through a room can be kept | Any room item can be saved to your workspace in one action |
+| G4 | Public pages are worth visiting and coming back to | Visitors can comment on and follow public pages; owners get notified |
+| G5 | Public social features can't be easily abused | Rate limits, reporting and owner moderation ship with comments, not after them |
+
+### 0.3 v3 scope
+
+**A — Transfer core**
+
+1. **Pair without typing.** The sending device shows a QR code and a short code for the room; the receiving device scans the code or opens the link. Typing the code by hand stays as a fallback.
+2. **Paste to send.** Pasting anywhere in a room (Ctrl/Cmd+V or long-press) adds the item. Dropping files onto the page uploads them.
+3. **Installable app (PWA)**, plus share targets on mobile and desktop, so "Share → Saveswitch" sends to your last room or to your workspace.
+4. **Save to workspace.** A signed-in user in a room can save one item, or the whole room, to a page.
+5. **Longer rooms for signed-in users.** Anonymous rooms stay at 3 h. Signed-in owners can extend a room (exact length to be decided).
+6. **Faster, larger uploads.** Upload straight to Cloudinary using a signed request from the server, instead of streaming through the API. This lifts the 10 MB per-file API limit up to the 100 MB per-room cap.
+7. **Browser extension (stretch).** Send the current page, selection or image to your room or workspace.
+
+**B — Boards and public collections**
+
+1. **Comments** on public pages (section 0.4).
+2. **Notifications** (section 0.4).
+3. **Follow** a public profile or page, with a simple feed of updates.
+4. **Better public pages**: open-graph previews when shared, a page title and description, and choosing which page a profile opens on.
+5. **Moderation**: owners can delete comments and turn comments off per page; visitors can report a comment; comments are rate-limited.
+
+### 0.4 Promised but never built
+
+The original design (sections 1–13 and `rough-note.md`) promised these features. The code base has none of them as of 2026-11-21. v3 decides what happens to each one.
+
+| Feature | Original promise | v3 decision |
+|---------|------------------|-------------|
+| **Comments** | Signed-in users comment on public resources; comments appear live over the socket (sections 5.2, 5.3, 6.1, 6.2) | **In v3 (B1).** Comment on a public *page* first. Per-resource threads come later if pages prove too coarse |
+| **Notifications** | `notifications` table, unread badge on the dashboard, live `notification:new` event (sections 4, 5.3, 6.2) | **In v3 (B2).** Kinds: new comment, new follower, room item received. In-app only; email or push decided later |
+| **Signed direct uploads** | `POST /upload/sign`; the client uploads straight to Cloudinary (section 9). Today the API receives the file and forwards it | **In v3 (A6)** |
+| **Installable mobile app (PWA)** | Service worker and web app manifest (section 13) | **In v3 (A3)** |
+| **Configurable room lifetime** | A configurable time limit for rooms, defaulting to 24 h (sections 5.1, 7.2). Today it's fixed at 3 h | **In v3 (A5)**, for signed-in owners only |
+| **Analytics for public profiles** | Views, shares and comment activity on public profiles (section 13) | **Later.** Only a view count on public pages, if it's cheap |
+| **End-to-end encryption** | Optional encryption for private rooms (section 13) | **Later.** Worth doing, but it conflicts with server-side link previews and must be designed carefully |
+| **Webhooks / integrations** | Forward saved resources to Notion, Slack and similar (section 13) | **Not planned** for v3 |
+
+Already built, contrary to some notes: the public/private switch (one per page, used by the dashboard's Private/Public view and by `/@username`), PDF and file resources, and pasting from the clipboard on the dashboard.
+
+### 0.5 Where the original design and the running system differ
+
+| Area | Sections 1–13 say | Running system (Nov 2026) |
+|------|-------------------|---------------------------|
+| Web app | React + Vite SPA, React Router | Next.js 16 app router, built with vinext and served by a Cloudflare Worker (`saveswitch.xyz`) |
+| Real time | Socket.IO | Elysia's built-in WebSocket at `/ws`, one topic per room |
+| Database | Neon Postgres | Postgres on Railway (`saveswitch-postgres`); PGlite for local development |
+| API hosting | Fly.io or Railway | Railway (`saveswitch-api`), reached through a Cloudflare tunnel at `api.saveswitch.xyz` |
+| Data model | `resources` carries `path_code` and `visibility`; `comments` and `notifications` tables exist | `users` → `pages` → `resources`; rooms are pages with a `path_code`; visibility is per page; no comments or notifications tables yet |
+| Server layout | `routes/`, `services/`, `ws/` modules | Most routes live in `server/src/index.ts`; helpers sit beside it in `server/src/` |
+| Room clean-up | Bun cron or pg_cron, 24 h | The API sweeps expired rooms every minute; a Railway cron (`saveswitch-cleanup`, 03:30 UTC) runs as a backup; 3 h lifetime |
+| Uploads | Signed direct-to-Cloudinary | Uploaded through the API, then sent on to Cloudinary |
+
+### 0.6 Open questions
+
+1. **Who is the primary user?** Someone moving files between their own devices, or someone sharing with other people? This decides whether pairing (A1) or public pages (B) gets polished first.
+2. **Room length for signed-in owners**: 24 h, 7 days, or until deleted?
+3. **Comment scope**: on a whole page or on each resource; and can signed-out visitors read comments?
+4. **Notification delivery**: in-app only for v3, or also email or web push?
+5. **Making money**: is there a paid tier in v3 (larger uploads, longer rooms), or is v3 about growth only?
+6. **Extension and mobile**: is the browser extension (A7) in v3 or v3.x? Is the PWA enough on mobile, or is a native app needed?
+7. **Release plan**: target date, and does v3 ship all at once or feature by feature behind flags?
+
+---
+
 ## 1. Overview
 
 Saveswitch is a real-time web application that enables seamless cross-device sharing of copied resources (text, links, and images). It supports two modes of operation:
